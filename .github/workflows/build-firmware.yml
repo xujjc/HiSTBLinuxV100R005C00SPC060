@@ -1,0 +1,87 @@
+name: 编译Hi3798mv100固件（RT8188FTV+USB打印+CUPS）
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: 拉取源码仓库
+        uses: actions/checkout@v4
+        with:
+          repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
+          path: HiSTBLinux
+
+      - name: 安装编译依赖
+        run: |
+          sudo apt update
+          sudo apt install -y gcc-arm-linux-gnueabihf make gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
+
+      - name: 准备RT8188FTV驱动源码
+        run: |
+          cd HiSTBLinux
+          mkdir -p third_party/open_source/rtl8188ftv
+          git clone https://github.com/lwfinger/rtl8188eu.git third_party/open_source/rtl8188ftv
+          wget https://raw.githubusercontent.com/yourusername/patches/main/rtl8188ftv-4.4.patch -O third_party/open_source/rtl8188ftv/4.4.patch
+          cd third_party/open_source/rtl8188ftv && git apply 4.4.patch || true  # 忽略补丁失败（若无需补丁）
+
+      - name: 初始化SDK环境
+        run: |
+          cd HiSTBLinux
+          sh server_install.sh
+          cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
+          source ./env.sh
+          env > sdk_env.txt
+
+      - name: 修改内核配置（支持RT8188FTV、USB打印、CUPS）
+        run: |
+          cd HiSTBLinux
+          source sdk_env.txt
+          cd source/kernel/linux-4.4.y
+          cp ../../../../hi3798mv100_defconfig arch/arm/configs/
+          make ARCH=arm hi3798mv100_defconfig
+          # 核心：添加USB打印支持及依赖
+          sed -i '/CONFIG_USB_PRINTER/d' .config
+          echo "CONFIG_USB=y" >> .config  # 基础USB支持
+          echo "CONFIG_USB_UHCI_HCD=y" >> .config  # USB控制器驱动（根据硬件选择，如UHCI/OHCI/EHCI）
+          echo "CONFIG_USB_OHCI_HCD=y" >> .config
+          echo "CONFIG_USB_EHCI_HCD=y" >> .config
+          echo "CONFIG_USB_PRINTER=y" >> .config  # USB打印服务核心支持
+          # 补充原有无线和CUPS配置
+          echo "CONFIG_CGROUPS=y" >> .config
+          echo "CONFIG_CGROUP_DEVICE=y" >> .config
+          echo "CONFIG_CGROUP_CPUACCT=y" >> .config
+          echo "CONFIG_DEVTMPFS=y" >> .config
+          echo "CONFIG_DEVTMPFS_MOUNT=y" >> .config
+          echo "CONFIG_FHANDLE=y" >> .config
+          echo "CONFIG_CFG80211=y" >> .config
+          echo "CONFIG_MAC80211=y" >> .config
+          echo "CONFIG_RTL8188FTV=y" >> .config
+          echo "CONFIG_RTLWIFI=y" >> .config
+          echo "CONFIG_RTLWIFI_USB=y" >> .config
+          echo "CONFIG_WIRELESS_EXT=y" >> .config
+          echo "CONFIG_WEXT_CORE=y" >> .config
+          # 保存配置
+          make ARCH=arm savedefconfig
+          cp defconfig arch/arm/configs/hi3798mv100_defconfig
+
+      - name: 编译固件
+        run: |
+          cd HiSTBLinux
+          source sdk_env.txt
+          make build -j4 2>&1 | tee build.log
+          mkbootargs -s 64 -r bootargs_input.txt -o out/hi3798mv100/bootargs.bin
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi3798mv100-firmware-usb-print
+          path: |
+            HiSTBLinux/out/hi3798mv100/*
+            HiSTBLinux/build.log
