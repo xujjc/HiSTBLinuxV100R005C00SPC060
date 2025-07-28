@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（修复dtc补丁路径错误）
+name: 编译Hi3798mv100固件（修复sed命令错误）
 
 on:
   push:
@@ -27,7 +27,7 @@ jobs:
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
 
-      - name: 下载内核并手动修复dtc错误
+      - name: 下载内核并修复dtc错误（修正sed命令）
         run: |
           cd HiSTBLinux
           # 下载并解压内核源码
@@ -36,9 +36,8 @@ jobs:
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
           
-          # 手动删除dtc-lexer.lex.c中的yylloc定义（解决重复定义）
-          # 直接定位文件并注释冲突行
-          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;  /* 注释重复定义 */' source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c
+          # 修复sed分隔符冲突：用@代替/作为分隔符
+          sed -i 's@^extern YYLTYPE yylloc;@#extern YYLTYPE yylloc;  /* 注释重复定义 */@' source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c
 
       - name: 准备RT8188FTV驱动
         run: |
