@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（终极解决.config问题）
+name: 编译Hi3798mv100固件（最终解决.config依赖问题）
 
 on:
   workflow_dispatch:
@@ -22,109 +22,103 @@ jobs:
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
-          # 验证工具链
           arm-linux-gnueabihf-gcc --version | head -n1
 
-      - name: 准备内核源码（清理+解压）
+      - name: 准备内核源码（仅解压，不执行配置相关步骤）
         run: |
           cd HiSTBLinux
-          # 下载并解压内核
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          rm -rf source/kernel/linux-4.4.y  # 清理旧目录（若有）
+          rm -rf source/kernel/linux-4.4.y  # 彻底清理旧目录
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
-          # 进入内核目录，执行清理（关键：避免旧配置干扰）
-          cd source/kernel/linux-4.4.y
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- mrproper  # 彻底清理
 
-      - name: 修复dtc错误
-        run: |
-          cd HiSTBLinux/source/kernel/linux-4.4.y
-          # 先准备内核配置环境
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- prepare
-          # 生成dtc工具并修复
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- scripts/dtc
-          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
-
-      - name: 初始化SDK
+      - name: 初始化SDK（提前加载环境变量）
         run: |
           cd HiSTBLinux
           bash server_install.sh
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
-          # 输出环境变量确认
-          echo "ARCH: $ARCH"
-          echo "CROSS_COMPILE: $CROSS_COMPILE"
+          # 输出关键变量确认
+          echo "ARCH: $ARCH"  # 应输出arm
+          echo "CROSS_COMPILE: $CROSS_COMPILE"  # 应输出arm-linux-gnueabihf-
+          env | grep -E '^ARCH|^CROSS_COMPILE' > sdk_env.txt
 
-      - name: 精准定位defconfig并生成.config
+      - name: 优先生成.config（解决依赖顺序问题）
         run: |
           cd HiSTBLinux
+          source sdk_env.txt
           KERNEL_DIR="source/kernel/linux-4.4.y"
-          # 1. 确认SDK中defconfig的实际名称（针对hi3798mdmo1g机型）
-          # 可能的文件名：hi3798mdmo1g_defconfig 或 hi3798mv100_defconfig
-          SDK_DEFCONFIG_DIR="configs/hi3798mv100"
-          echo "SDK配置目录文件（寻找defconfig）："
-          ls -la $SDK_DEFCONFIG_DIR
-          # 尝试常见文件名（根据实际输出修改）
-          SDK_DEFCONFIG=$(find $SDK_DEFCONFIG_DIR -name "*hi3798mv100*.defconfig" | head -n1)
-          if [ -z "$SDK_DEFCONFIG" ]; then
-            echo "Error: 未找到defconfig文件"
+          # 1. 找到SDK中针对hi3798mdmo1g机型的defconfig（关键文件名）
+          SDK_DEFCONFIG="configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_defconfig"  # 匹配cfg.mak中的机型
+          echo "使用的defconfig：$SDK_DEFCONFIG"
+          if [ ! -f "$SDK_DEFCONFIG" ]; then
+            echo "Error: 未找到机型对应的defconfig → $SDK_DEFCONFIG"
+            echo "SDK配置目录内容："
+            ls -la configs/hi3798mv100/
             exit 1
           fi
-          echo "找到defconfig：$SDK_DEFCONFIG"
 
-          # 2. 复制defconfig到内核配置目录
-          mkdir -p $KERNEL_DIR/arch/arm/configs/
-          cp -f $SDK_DEFCONFIG $KERNEL_DIR/arch/arm/configs/hi3798mv100_defconfig
-          # 重命名为make能识别的名称
-          DEFCONFIG_NAME=$(basename $SDK_DEFCONFIG .defconfig)
-          echo "使用defconfig名称：$DEFCONFIG_NAME"
+          # 2. 复制defconfig到内核配置目录（命名为hi3798mdmo1g_defconfig）
+          DEFCONFIG_NAME="hi3798mdmo1g_defconfig"  # 与机型匹配的名称
+          mkdir -p "$KERNEL_DIR/arch/arm/configs/"
+          cp -f "$SDK_DEFCONFIG" "$KERNEL_DIR/arch/arm/configs/$DEFCONFIG_NAME"
 
-          # 3. 生成.config（明确使用找到的defconfig名称）
-          cd $KERNEL_DIR
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- $DEFCONFIG_NAME V=1 2>&1 | tee defconfig.log
-
-          # 4. 若.config仍未生成，手动创建（应急）
-          if [ ! -f ".config" ]; then
-            echo "手动创建基础.config"
-            echo "CONFIG_ARM=y" > .config
-            echo "CONFIG_HI3798MV100=y" >> .config
-            make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- oldconfig < <(echo -e "yes\n" | head -n1000)
-          fi
-
-          # 5. 最终验证
+          # 3. 进入内核目录，生成.config（在任何依赖步骤前执行）
+          cd "$KERNEL_DIR"
+          # 先清理旧配置
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE mrproper
+          # 生成.config（使用机型对应的defconfig名称）
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE $DEFCONFIG_NAME V=1
+          # 验证.config是否生成
           if [ ! -f ".config" ]; then
             echo "Error: .config生成失败"
             exit 1
           else
-            echo ".config生成成功"
+            echo ".config生成成功，前5行："
+            head -n5 .config
           fi
 
-      - name: 配置内核功能
+      - name: 修复dtc错误（此时.config已存在，避免依赖报错）
+        run: |
+          cd HiSTBLinux
+          source sdk_env.txt
+          cd source/kernel/linux-4.4.y
+          # 此时执行prepare和dtc生成，依赖.config已存在
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE prepare
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE scripts/dtc
+          # 修复dtc的yylloc重复定义
+          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
+
+      - name: 配置内核功能（无线+USB打印）
         run: |
           cd HiSTBLinux/source/kernel/linux-4.4.y
-          # 添加必要配置
+          # 基于已生成的.config添加配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_CFG80211=y" >> .config
+          echo "CONFIG_MAC80211=y" >> .config
           echo "CONFIG_RTL8188FTV=y" >> .config
+          echo "CONFIG_RTLWIFI=y" >> .config
+          echo "CONFIG_RTLWIFI_USB=y" >> .config
+          # 更新配置
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- oldconfig V=1
 
       - name: 编译内核
         run: |
           cd HiSTBLinux/source/kernel/linux-4.4.y
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2 V=1
 
       - name: 编译完整固件
         run: |
           cd HiSTBLinux
-          source ./env.sh
+          source sdk_env.txt
           make build -j4 2>&1 | tee build.log
 
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: final-firmware
+          name: hi3798mv100-firmware
           path: |
             HiSTBLinux/out/hi3798mv100/*
             HiSTBLinux/build.log
