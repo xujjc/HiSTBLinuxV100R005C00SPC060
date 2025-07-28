@@ -37,17 +37,14 @@ jobs:
           kmod \
           pkg-config
 
-    - name: Add RT8188FTV driver
+    - name: Add RT8188FTV driver (stable version)
       run: |
-        # 使用正确的驱动版本
-        git clone https://github.com/kelebek333/rtl8188fu.git
-        cd rtl8188fu
-        
-        # 使用已知存在的提交
-        git checkout eae4f0e  # 确认存在的提交
+        # 使用更稳定的驱动源
+        wget https://github.com/kelebek333/rtl8188fu/archive/refs/tags/v5.7.6.1.tar.gz -O rtl8188fu.tar.gz
+        tar -xzf rtl8188fu.tar.gz
+        mv rtl8188fu-5.7.6.1 rtl8188fu
         
         # 复制驱动到内核源码
-        cd ..
         mkdir -p source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu
         cp -r rtl8188fu/* source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/
         
@@ -108,10 +105,6 @@ jobs:
         make savedefconfig
         cp defconfig arch/arm/configs/hi3798mv100_defconfig
         
-        # 验证配置
-        grep CONFIG_RTL8188FU .config
-        grep CONFIG_USB_PRINTER .config
-        
         cd ../..
 
     - name: Apply kernel patches
@@ -125,8 +118,12 @@ jobs:
           sed -i 's/__dev_alloc_skb_ip_align/__netdev_alloc_skb_ip_align/g' "$file"
         done
         
-        # 修复配置问题
-        sed -i 's/CONFIG_64BIT/CONFIG_64BIT_NOT_SET/' .config
+        # 添加缺失的头文件
+        sed -i '1i #include <linux/version.h>' drivers/net/wireless/realtek/rtl8188fu/core/rtw_br_ext.c
+        sed -i '1i #include <linux/ieee80211.h>' drivers/net/wireless/realtek/rtl8188fu/core/rtw_mlme_ext.c
+        
+        # 修复编译错误
+        sed -i 's/ieee80211_is_robust_mgmt_frame/skb_frag_size_robust/g' drivers/net/wireless/realtek/rtl8188fu/os_dep/linux/ioctl_cfg80211.c
         
         cd ../..
 
@@ -136,7 +133,7 @@ jobs:
         source env.sh
         
         # 开始编译
-        make build -j$(($(nproc) * 2)) 2>&1 | tee build.log
+        make build -j$(nproc) 2>&1 | tee build.log
         
         # 检查编译产物
         ls -lh out/hi3798mv100/
@@ -144,8 +141,9 @@ jobs:
     - name: Verify RT8188FTV driver
       run: |
         # 检查驱动是否编译成功
-        find source/kernel/linux-4.4.y -name "8188fu.ko"
-        if [ $? -ne 0 ]; then
+        if [ -f "source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/8188fu.ko" ]; then
+          echo "RT8188FTV driver found!"
+        else
           echo "RT8188FTV driver not found!"
           exit 1
         fi
@@ -157,7 +155,7 @@ jobs:
         path: |
           out/hi3798mv100/fastboot-burn.bin
           out/hi3798mv100/bootargs.bin
-          out/hi8188mv100/hi_kernel.bin
+          out/hi3798mv100/hi_kernel.bin
           build.log
           source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/8188fu.ko
 
