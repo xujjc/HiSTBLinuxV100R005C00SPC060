@@ -23,13 +23,13 @@ jobs:
           sudo apt update
           sudo apt install -y gcc-arm-linux-gnueabihf make gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
 
-      - name: 准备RT8188FTV驱动源码
+      - name: 准备RT8188FTV驱动源码（兼容内核4.4）
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/rtl8188ftv
-          git clone https://github.com/lwfinger/rtl8188eu.git third_party/open_source/rtl8188ftv
-          wget https://raw.githubusercontent.com/yourusername/patches/main/rtl8188ftv-4.4.patch -O third_party/open_source/rtl8188ftv/4.4.patch
-          cd third_party/open_source/rtl8188ftv && git apply 4.4.patch || true  # 忽略补丁失败（若无需补丁）
+          # 使用内核4.4兼容的RT8188FTV驱动（替换为有效仓库）
+          git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
+          # 移除无效补丁步骤（该驱动已适配4.4内核）
 
       - name: 初始化SDK环境
         run: |
@@ -46,14 +46,13 @@ jobs:
           cd source/kernel/linux-4.4.y
           cp ../../../../hi3798mv100_defconfig arch/arm/configs/
           make ARCH=arm hi3798mv100_defconfig
-          # 核心：添加USB打印支持及依赖
+          # 添加USB打印和无线配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
-          echo "CONFIG_USB=y" >> .config  # 基础USB支持
-          echo "CONFIG_USB_UHCI_HCD=y" >> .config  # USB控制器驱动（根据硬件选择，如UHCI/OHCI/EHCI）
+          echo "CONFIG_USB=y" >> .config
+          echo "CONFIG_USB_UHCI_HCD=y" >> .config
           echo "CONFIG_USB_OHCI_HCD=y" >> .config
           echo "CONFIG_USB_EHCI_HCD=y" >> .config
-          echo "CONFIG_USB_PRINTER=y" >> .config  # USB打印服务核心支持
-          # 补充原有无线和CUPS配置
+          echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_CGROUPS=y" >> .config
           echo "CONFIG_CGROUP_DEVICE=y" >> .config
           echo "CONFIG_CGROUP_CPUACCT=y" >> .config
@@ -67,7 +66,6 @@ jobs:
           echo "CONFIG_RTLWIFI_USB=y" >> .config
           echo "CONFIG_WIRELESS_EXT=y" >> .config
           echo "CONFIG_WEXT_CORE=y" >> .config
-          # 保存配置
           make ARCH=arm savedefconfig
           cp defconfig arch/arm/configs/hi3798mv100_defconfig
 
