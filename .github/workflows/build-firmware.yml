@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（最终修复dtc 404错误）
+name: 编译Hi3798mv100固件（修复dtc补丁路径错误）
 
 on:
   push:
@@ -27,39 +27,18 @@ jobs:
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
 
-      - name: 下载内核并修复dtc错误（替换有效补丁）
+      - name: 下载内核并手动修复dtc错误
         run: |
           cd HiSTBLinux
-          # 下载内核源码
+          # 下载并解压内核源码
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          # 手动解压并命名
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
-          # 修复dtc的yylloc重复定义（使用内核4.4兼容补丁）
-          # 补丁内容：移除lexer中的yylloc定义，使用parser中的定义
-          cat > source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c.patch << 'EOF'
-          --- dtc-lexer.lex.c.orig	2025-07-28 00:00:00 +0000
-          +++ dtc-lexer.lex.c	2025-07-28 00:00:01 +0000
-          @@ -1,5 +1,5 @@
-           /* A Bison parser, made by GNU Bison 2.4.1.  */
-          -/* Skeleton implementation for Bison LALR(1) parsers in C
-          +/* Skeleton implementation for Bison LALR(1) parsers in C
-           
-              Copyright (C) 1984, 1989, 1990, 2000, 2001, 2002, 2003, 2004, 2005, 2006
-              Free Software Foundation, Inc.
-          @@ -64,7 +64,6 @@
-           #endif
-           
-           extern int yylineno;
-          -extern YYLTYPE yylloc;
-           
-           #define YYERROR_VERBOSE 1
-           
-          EOF
-          # 应用补丁
-          cd source/kernel/linux-4.4.y/scripts/dtc/
-          patch -p0 < dtc-lexer.lex.c.patch
+          
+          # 手动删除dtc-lexer.lex.c中的yylloc定义（解决重复定义）
+          # 直接定位文件并注释冲突行
+          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;  /* 注释重复定义 */' source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c
 
       - name: 准备RT8188FTV驱动
         run: |
