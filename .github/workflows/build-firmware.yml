@@ -18,43 +18,54 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖（含指定版本make）
+      - name: 安装依赖并修复环境
         run: |
           sudo apt update
-          # 卸载系统默认的make 4.3
+          # 卸载高版本make，安装指定版本3.81
           sudo apt remove -y make
-          # 安装依赖工具
-          sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential wget
-          # 手动下载并安装make 3.81（脚本要求的版本）
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          # 修复sh链接为bash
+          # 安装其他编译依赖
+          sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
+          # 修复sh指向bash
           sudo ln -sf /bin/bash /bin/sh
-          # 验证make版本
-          make --version
+          # 验证环境
+          make --version | head -n1
+          bash --version | head -n1
 
-      - name: 准备RT8188FTV驱动源码
+      - name: 准备RT8188FTV无线驱动
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/rtl8188ftv
+          # 克隆兼容内核4.4的RT8188FTV驱动
           git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
 
-      - name: 初始化SDK环境（兼容make 3.81）
+      - name: 初始化SDK环境（过滤有效变量）
         run: |
           cd HiSTBLinux
-          bash server_install.sh  # 此时make版本符合要求，可正常执行
+          # 用bash执行安装脚本，确保环境正确
+          bash server_install.sh
+          # 加载芯片配置（1G内存机型）
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-          source ./env.sh
-          env > sdk_env.txt
+          # 初始化SDK环境变量并过滤无效内容
+          source ./env.sh && env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^SDK_PATH|^PATH|^CC|^LD' > sdk_env.txt
 
-      - name: 修改内核配置
+      - name: 配置内核（支持无线+USB打印）
         run: |
           cd HiSTBLinux
+          # 加载过滤后的环境变量
           source sdk_env.txt
+          # 进入内核源码目录
           cd source/kernel/linux-4.4.y
-          cp ../../../../hi3798mv100_defconfig arch/arm/configs/
+          # 加载基础配置（若根目录无自定义配置则用默认）
+          if [ -f "../../../../hi3798mv100_defconfig" ]; then
+            cp ../../../../hi3798mv100_defconfig arch/arm/configs/
+          else
+            echo "使用内核默认配置"
+          fi
           make ARCH=arm hi3798mv100_defconfig
-          # 添加必要配置
+          
+          # 添加无线网卡和USB打印所需配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB=y" >> .config
           echo "CONFIG_USB_UHCI_HCD=y" >> .config
@@ -74,6 +85,8 @@ jobs:
           echo "CONFIG_RTLWIFI_USB=y" >> .config
           echo "CONFIG_WIRELESS_EXT=y" >> .config
           echo "CONFIG_WEXT_CORE=y" >> .config
+          
+          # 保存配置
           make ARCH=arm savedefconfig
           cp defconfig arch/arm/configs/hi3798mv100_defconfig
 
@@ -81,13 +94,15 @@ jobs:
         run: |
           cd HiSTBLinux
           source sdk_env.txt
+          # 执行编译（4线程）
           make build -j4 2>&1 | tee build.log
+          # 生成启动参数（适配1G内存）
           mkbootargs -s 64 -r bootargs_input.txt -o out/hi3798mv100/bootargs.bin
 
-      - name: 上传产物
+      - name: 上传编译产物
         uses: actions/upload-artifact@v4
         with:
-          name: hi3798mv100-firmware-usb-print
+          name: hi3798mv100-firmware-final
           path: |
             HiSTBLinux/out/hi3798mv100/*
             HiSTBLinux/build.log
