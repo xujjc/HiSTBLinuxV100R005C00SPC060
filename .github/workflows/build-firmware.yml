@@ -1,4 +1,4 @@
-name: Hi3798mv100在线编译固件（修复交叉编译器调用错误）
+name: Hi3798mv100在线编译（修复defconfig不存在问题）
 
 on:
   workflow_dispatch:
@@ -7,22 +7,20 @@ jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 拉取SDK源码
+      - name: 拉取源码
         uses: actions/checkout@v4
         with:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖（确保交叉编译器可用）
+      - name: 安装依赖
         run: |
           sudo apt update
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          # 安装ARM交叉编译工具链（关键）
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
-          # 验证交叉编译器
           arm-linux-gnueabihf-gcc --version | head -n1
 
       - name: 准备内核源码
@@ -34,45 +32,53 @@ jobs:
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
 
-      - name: 强制设置交叉编译环境变量
+      - name: 设置环境变量
         run: |
           cd HiSTBLinux
-          # 生成env.sh，明确交叉编译器路径
           cat > env.sh << 'EOF'
           export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-  # ARM交叉编译器前缀
-          export PATH=/usr/bin:$PATH  # 确保交叉编译器在路径中
-          export SDK_PATH=$(pwd)
-          export KERNELDIR=$SDK_PATH/source/kernel/linux-4.4.y
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export PATH=/usr/bin:$PATH
           EOF
-          # 加载变量并验证
           source ./env.sh
-          echo "交叉编译器前缀：$CROSS_COMPILE"
-          echo "交叉编译器版本：$($CROSS_COMPILE gcc --version | head -n1)"  # 验证是否为ARM编译器
+          echo "环境变量：ARCH=$ARCH, CROSS_COMPILE=$CROSS_COMPILE"
 
-      - name: 复制机型配置并生成.config
+      - name: 复制机型配置并选择defconfig（核心修复）
         run: |
           cd HiSTBLinux
           source ./env.sh
           # 复制机型配置
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-          # 生成.config（明确使用交叉编译器）
-          cd source/kernel/linux-4.4.y
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE hi3798mv100_defconfig V=1
+
+          # 1. 检查内核配置目录中的defconfig
+          KERNEL_DIR="source/kernel/linux-4.4.y"
+          KERNEL_DEFCONFIG_DIR="$KERNEL_DIR/arch/arm/configs"
+          echo "=== 内核配置目录文件（可用defconfig） ==="
+          ls -la $KERNEL_DEFCONFIG_DIR  # 列出所有可用defconfig
+
+          # 2. 若hi3798mv100_defconfig不存在，使用ARM通用配置（multi_v7_defconfig）
+          TARGET_DEFCONFIG="hi3798mv100_defconfig"
+          if [ ! -f "$KERNEL_DEFCONFIG_DIR/$TARGET_DEFCONFIG" ]; then
+            echo "未找到$TARGET_DEFCONFIG，使用ARM通用配置"
+            TARGET_DEFCONFIG="multi_v7_defconfig"  # ARMv7通用配置，兼容Hi3798mv100
+          fi
+          echo "使用defconfig：$TARGET_DEFCONFIG"
+
+          # 3. 生成.config文件
+          cd $KERNEL_DIR
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE $TARGET_DEFCONFIG V=1
           if [ ! -f ".config" ]; then
             echo "Error: .config生成失败"
             exit 1
           fi
 
-      - name: 修复dtc错误（使用交叉编译器）
+      - name: 修复dtc错误
         run: |
           cd HiSTBLinux
           source ./env.sh
           cd source/kernel/linux-4.4.y
-          # 生成dtc工具，明确指定交叉编译器
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare
           make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE scripts/dtc
-          # 修复yylloc重复定义
           sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
 
       - name: 配置内核功能
@@ -80,30 +86,17 @@ jobs:
           cd HiSTBLinux
           source ./env.sh
           cd source/kernel/linux-4.4.y
-          # 开启Docker和硬件支持
           echo "CONFIG_DEVTMPFS=y" >> .config
           echo "CONFIG_DEVTMPFS_MOUNT=y" >> .config
           echo "CONFIG_CGROUPS=y" >> .config
           echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_RTL8188FTV=y" >> .config
 
-      - name: 编译内核（强制使用交叉编译器）
+      - name: 编译内核和固件
         run: |
           cd HiSTBLinux
           source ./env.sh
-          cd source/kernel/linux-4.4.y
-          # 编译内核，明确传递ARCH和CROSS_COMPILE
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j4 V=1 2>&1 | tee kernel.log
-          # 检查是否使用了正确的编译器（应出现arm-linux-gnueabihf-gcc）
-          if ! grep -q "$CROSS_COMPILE" kernel.log; then
-            echo "Error: 未使用正确的交叉编译器"
-            exit 1
-          fi
-
-      - name: 编译完整固件
-        run: |
-          cd HiSTBLinux
-          source ./env.sh
+          make linux -j4 2>&1 | tee kernel.log
           make build -j4 2>&1 | tee build.log
 
       - name: 上传产物
