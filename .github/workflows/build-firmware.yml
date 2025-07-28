@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（RT8188FTV+USB打印+CUPS）
+name: 编译Hi3798mv100固件（最终修复版）
 
 on:
   push:
@@ -25,7 +25,7 @@ jobs:
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          # 安装其他依赖
+          # 安装其他依赖（包含lzma等）
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           # 修复sh指向bash
           sudo ln -sf /bin/bash /bin/sh
@@ -33,29 +33,37 @@ jobs:
           make --version | head -n1
           bash --version | head -n1
 
+      - name: 手动下载Linux 4.4内核源码（关键修复）
+        run: |
+          cd HiSTBLinux
+          # 创建目录并下载内核源码包
+          mkdir -p third_party/open_source/
+          wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
+          # 验证文件是否下载成功
+          ls -l third_party/open_source/linux-4.4.35.tar.gz
+
       - name: 准备RT8188FTV无线驱动
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/rtl8188ftv
           git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
 
-      - name: 初始化SDK并预编译生成内核目录
+      - name: 初始化SDK并编译内核目录
         run: |
           cd HiSTBLinux
           # 初始化SDK环境
           bash server_install.sh
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
-          # 预编译生成内核源码目录（关键：首次编译会解压内核源码）
-          make linux -j2  # 只编译内核，生成source/kernel/linux-4.4.y目录
-          # 保存过滤后的环境变量
+          # 编译内核（此时内核源码已存在，可正常解压）
+          make linux -j2
+          # 保存环境变量
           env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^SDK_PATH|^PATH|^CC|^LD' > sdk_env.txt
 
       - name: 配置内核（支持无线+USB打印）
         run: |
           cd HiSTBLinux
           source sdk_env.txt
-          # 进入内核目录（此时已存在）
           cd source/kernel/linux-4.4.y
           # 加载基础配置
           if [ -f "../../../../hi3798mv100_defconfig" ]; then
@@ -89,7 +97,7 @@ jobs:
           # 保存配置并重新编译内核
           make ARCH=arm savedefconfig
           cp defconfig arch/arm/configs/hi3798mv100_defconfig
-          make ARCH=arm -j2  # 应用配置后重新编译内核
+          make ARCH=arm -j2
 
       - name: 编译完整固件
         run: |
@@ -101,7 +109,7 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: hi3798mv100-firmware-final
+          name: hi3798mv100-firmware-complete
           path: |
             HiSTBLinux/out/hi3798mv100/*
             HiSTBLinux/build.log
