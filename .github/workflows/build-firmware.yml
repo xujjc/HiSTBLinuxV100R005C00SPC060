@@ -18,35 +18,37 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装编译依赖
+      - name: 安装编译依赖并修复sh链接
         run: |
           sudo apt update
+          # 安装依赖
           sudo apt install -y gcc-arm-linux-gnueabihf make gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
+          # 关键修复：将sh强制指向bash（解决脚本语法错误）
+          sudo ln -sf /bin/bash /bin/sh
 
       - name: 准备RT8188FTV驱动源码（兼容内核4.4）
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/rtl8188ftv
-          # 使用内核4.4兼容的RT8188FTV驱动（替换为有效仓库）
           git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
-          # 移除无效补丁步骤（该驱动已适配4.4内核）
 
-      - name: 初始化SDK环境
+      - name: 初始化SDK环境（修复脚本执行）
         run: |
           cd HiSTBLinux
-          sh server_install.sh
+          # 用bash执行安装脚本（避免sh兼容问题）
+          bash server_install.sh
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
           env > sdk_env.txt
 
-      - name: 修改内核配置（支持RT8188FTV、USB打印、CUPS）
+      - name: 修改内核配置
         run: |
           cd HiSTBLinux
           source sdk_env.txt
           cd source/kernel/linux-4.4.y
           cp ../../../../hi3798mv100_defconfig arch/arm/configs/
           make ARCH=arm hi3798mv100_defconfig
-          # 添加USB打印和无线配置
+          # 添加必要配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB=y" >> .config
           echo "CONFIG_USB_UHCI_HCD=y" >> .config
