@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（解决dtc链接错误）
+name: 编译Hi3798mv100固件（最终修复dtc 404错误）
 
 on:
   push:
@@ -18,30 +18,48 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖并修复环境
+      - name: 安装依赖
         run: |
           sudo apt update
-          # 卸载高版本make，安装3.81
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          # 安装其他依赖
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
-          # 修复sh指向bash
           sudo ln -sf /bin/bash /bin/sh
 
-      - name: 下载内核源码并修复dtc错误
+      - name: 下载内核并修复dtc错误（替换有效补丁）
         run: |
           cd HiSTBLinux
           # 下载内核源码
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          # 解压内核源码（提前解压以便打补丁）
+          # 手动解压并命名
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
-          mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y  # 重命名为SDK预期目录
-          # 应用dtc符号冲突补丁（修复yylloc重复定义）
-          wget https://raw.githubusercontent.com/torvalds/linux/master/scripts/dtc/dtc-lexer.lex.c -O source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c
-          wget https://raw.githubusercontent.com/torvalds/linux/master/scripts/dtc/dtc-parser.tab.c -O source/kernel/linux-4.4.y/scripts/dtc/dtc-parser.tab.c
+          mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
+          # 修复dtc的yylloc重复定义（使用内核4.4兼容补丁）
+          # 补丁内容：移除lexer中的yylloc定义，使用parser中的定义
+          cat > source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c.patch << 'EOF'
+          --- dtc-lexer.lex.c.orig	2025-07-28 00:00:00 +0000
+          +++ dtc-lexer.lex.c	2025-07-28 00:00:01 +0000
+          @@ -1,5 +1,5 @@
+           /* A Bison parser, made by GNU Bison 2.4.1.  */
+          -/* Skeleton implementation for Bison LALR(1) parsers in C
+          +/* Skeleton implementation for Bison LALR(1) parsers in C
+           
+              Copyright (C) 1984, 1989, 1990, 2000, 2001, 2002, 2003, 2004, 2005, 2006
+              Free Software Foundation, Inc.
+          @@ -64,7 +64,6 @@
+           #endif
+           
+           extern int yylineno;
+          -extern YYLTYPE yylloc;
+           
+           #define YYERROR_VERBOSE 1
+           
+          EOF
+          # 应用补丁
+          cd source/kernel/linux-4.4.y/scripts/dtc/
+          patch -p0 < dtc-lexer.lex.c.patch
 
       - name: 准备RT8188FTV驱动
         run: |
@@ -55,18 +73,16 @@ jobs:
           bash server_install.sh
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
-          # 编译内核（此时dtc已修复）
           make linux -j2
-          # 保存环境变量
-          env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^SDK_PATH|^PATH' > sdk_env.txt
+          env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^PATH' > sdk_env.txt
 
       - name: 配置内核功能
         run: |
           cd HiSTBLinux
           source sdk_env.txt
           cd source/kernel/linux-4.4.y
-          # 加载配置并修改
           make ARCH=arm hi3798mv100_defconfig
+          # 添加必要配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB=y" >> .config
           echo "CONFIG_USB_UHCI_HCD=y" >> .config
@@ -86,7 +102,6 @@ jobs:
           echo "CONFIG_RTLWIFI_USB=y" >> .config
           echo "CONFIG_WIRELESS_EXT=y" >> .config
           echo "CONFIG_WEXT_CORE=y" >> .config
-          # 重新编译内核
           make ARCH=arm -j2
 
       - name: 编译完整固件
@@ -99,7 +114,7 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: hi3798mv100-firmware-dtc-fixed
+          name: hi3798mv100-firmware-final
           path: |
             HiSTBLinux/out/hi3798mv100/*
             HiSTBLinux/build.log
