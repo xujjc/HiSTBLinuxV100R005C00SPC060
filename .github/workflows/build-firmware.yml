@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（修复lex依赖错误）
+name: 编译Hi3798mv100固件（修复.config缺失错误）
 
 on:
   push:
@@ -18,32 +18,27 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖（移除lex，保留flex）
+      - name: 安装依赖
         run: |
           sudo apt update
-          # 卸载高版本make，安装3.81
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          # 安装依赖：flex替代lex，bison替代yacc，无需单独安装lex
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
 
-      - name: 下载内核并生成dtc文件
+      - name: 下载内核并修复dtc错误
         run: |
           cd HiSTBLinux
-          # 下载并解压内核源码
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
           
-          # 生成dtc-lexer.lex.c（依赖flex，已安装）
+          # 生成dtc-lexer.lex.c并修复
           cd source/kernel/linux-4.4.y
           make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- prepare
           make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- scripts/dtc
-          
-          # 修改文件解决重复定义
           sed -i 's@^extern YYLTYPE yylloc;@#extern YYLTYPE yylloc;  /* 注释重复定义 */@' scripts/dtc/dtc-lexer.lex.c
 
       - name: 准备RT8188FTV驱动
@@ -52,22 +47,38 @@ jobs:
           mkdir -p third_party/open_source/rtl8188ftv
           git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
 
-      - name: 初始化SDK并编译内核
+      - name: 初始化SDK环境
         run: |
           cd HiSTBLinux
           bash server_install.sh
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
-          make linux -j2
           env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^PATH' > sdk_env.txt
+
+      - name: 生成内核配置文件（解决.config缺失）
+        run: |
+          cd HiSTBLinux
+          source sdk_env.txt
+          cd source/kernel/linux-4.4.y
+          # 确保defconfig存在，若不存在则使用SDK默认配置
+          if [ ! -f "arch/arm/configs/hi3798mv100_defconfig" ]; then
+            echo "使用SDK默认defconfig"
+            cp ../../../../configs/hi3798mv100/hi3798mv100_defconfig arch/arm/configs/
+          fi
+          # 生成.config文件（关键步骤）
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- hi3798mv100_defconfig
+          # 验证.config是否生成
+          if [ ! -f ".config" ]; then
+            echo "Error: .config文件未生成"
+            exit 1
+          fi
 
       - name: 配置内核功能
         run: |
           cd HiSTBLinux
           source sdk_env.txt
           cd source/kernel/linux-4.4.y
-          make ARCH=arm hi3798mv100_defconfig
-          # 添加必要配置
+          # 基于已生成的.config添加配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB=y" >> .config
           echo "CONFIG_USB_UHCI_HCD=y" >> .config
@@ -87,7 +98,9 @@ jobs:
           echo "CONFIG_RTLWIFI_USB=y" >> .config
           echo "CONFIG_WIRELESS_EXT=y" >> .config
           echo "CONFIG_WEXT_CORE=y" >> .config
-          make ARCH=arm -j2
+          # 更新配置
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- oldconfig
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2
 
       - name: 编译完整固件
         run: |
