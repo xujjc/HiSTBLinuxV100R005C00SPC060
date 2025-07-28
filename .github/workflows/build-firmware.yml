@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（修复sed命令错误）
+name: 编译Hi3798mv100固件（解决dtc-lexer文件不存在问题）
 
 on:
   push:
@@ -24,10 +24,10 @@ jobs:
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
+          sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential lex yacc
           sudo ln -sf /bin/bash /bin/sh
 
-      - name: 下载内核并修复dtc错误（修正sed命令）
+      - name: 下载内核并生成dtc文件（关键修复）
         run: |
           cd HiSTBLinux
           # 下载并解压内核源码
@@ -36,8 +36,14 @@ jobs:
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
           
-          # 修复sed分隔符冲突：用@代替/作为分隔符
-          sed -i 's@^extern YYLTYPE yylloc;@#extern YYLTYPE yylloc;  /* 注释重复定义 */@' source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c
+          # 进入内核目录，触发dtc-lexer.lex.c生成（通过make prepare）
+          cd source/kernel/linux-4.4.y
+          # 生成必要的配置和中间文件（包括dtc相关的lex文件）
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- prepare
+          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- scripts/dtc
+          
+          # 此时dtc-lexer.lex.c已生成，执行修改
+          sed -i 's@^extern YYLTYPE yylloc;@#extern YYLTYPE yylloc;  /* 注释重复定义 */@' scripts/dtc/dtc-lexer.lex.c
 
       - name: 准备RT8188FTV驱动
         run: |
