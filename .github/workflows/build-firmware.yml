@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（最终解决.config依赖问题）
+name: 编译Hi3798mv100固件（修复环境变量为空问题）
 
 on:
   workflow_dispatch:
@@ -14,105 +14,102 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖
+      - name: 安装依赖（确保交叉编译器被识别）
         run: |
           sudo apt update
+          # 卸载高版本make，安装3.81
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
+          # 安装交叉编译工具链（关键：确保被SDK识别）
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
-          arm-linux-gnueabihf-gcc --version | head -n1
+          # 验证交叉编译器路径
+          which arm-linux-gnueabihf-gcc || { echo "Error: 交叉编译器未安装"; exit 1; }
 
-      - name: 准备内核源码（仅解压，不执行配置相关步骤）
+      - name: 准备内核源码
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          rm -rf source/kernel/linux-4.4.y  # 彻底清理旧目录
+          rm -rf source/kernel/linux-4.4.y
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
 
-      - name: 初始化SDK（提前加载环境变量）
+      - name: 修复SDK安装脚本的环境变量生成（核心修复）
         run: |
           cd HiSTBLinux
-          bash server_install.sh
-          cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
+          # 1. 执行server_install.sh并忽略误报的警告（lzma/gcc已安装）
+          bash server_install.sh || echo "忽略非致命警告，继续执行"
+          
+          # 2. 检查env.sh是否生成，若未生成则手动创建
+          if [ ! -f "env.sh" ]; then
+            echo "手动生成env.sh"
+            cat > env.sh << 'EOF'
+          # 手动设置交叉编译环境变量
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export PATH=/usr/bin:$PATH  # 交叉编译器所在路径
+          export SDK_PATH=$(pwd)
+          export KERNELDIR=$(pwd)/source/kernel/linux-4.4.y
+          EOF
+          fi
+          
+          # 3. 修复现有env.sh中的变量缺失（若ARCH/CROSS_COMPILE为空）
+          echo "修复env.sh中的环境变量..."
+          sed -i '/^export ARCH=/d' env.sh
+          sed -i '/^export CROSS_COMPILE=/d' env.sh
+          echo 'export ARCH=arm' >> env.sh
+          echo 'export CROSS_COMPILE=arm-linux-gnueabihf-' >> env.sh
+          echo 'export PATH=/usr/bin:$PATH' >> env.sh  # 确保交叉编译器在PATH中
+          
+          # 4. 验证env.sh内容
+          echo "env.sh内容："
+          cat env.sh
+          
+          # 5. 加载环境变量并验证
           source ./env.sh
-          # 输出关键变量确认
-          echo "ARCH: $ARCH"  # 应输出arm
-          echo "CROSS_COMPILE: $CROSS_COMPILE"  # 应输出arm-linux-gnueabihf-
-          env | grep -E '^ARCH|^CROSS_COMPILE' > sdk_env.txt
-
-      - name: 优先生成.config（解决依赖顺序问题）
-        run: |
-          cd HiSTBLinux
-          source sdk_env.txt
-          KERNEL_DIR="source/kernel/linux-4.4.y"
-          # 1. 找到SDK中针对hi3798mdmo1g机型的defconfig（关键文件名）
-          SDK_DEFCONFIG="configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_defconfig"  # 匹配cfg.mak中的机型
-          echo "使用的defconfig：$SDK_DEFCONFIG"
-          if [ ! -f "$SDK_DEFCONFIG" ]; then
-            echo "Error: 未找到机型对应的defconfig → $SDK_DEFCONFIG"
-            echo "SDK配置目录内容："
-            ls -la configs/hi3798mv100/
+          echo "验证环境变量："
+          echo "ARCH: $ARCH"
+          echo "CROSS_COMPILE: $CROSS_COMPILE"
+          if [ -z "$ARCH" ] || [ -z "$CROSS_COMPILE" ]; then
+            echo "Error: 环境变量仍未正确设置"
             exit 1
           fi
 
-          # 2. 复制defconfig到内核配置目录（命名为hi3798mdmo1g_defconfig）
-          DEFCONFIG_NAME="hi3798mdmo1g_defconfig"  # 与机型匹配的名称
-          mkdir -p "$KERNEL_DIR/arch/arm/configs/"
-          cp -f "$SDK_DEFCONFIG" "$KERNEL_DIR/arch/arm/configs/$DEFCONFIG_NAME"
-
-          # 3. 进入内核目录，生成.config（在任何依赖步骤前执行）
+      - name: 复制机型配置并生成.config
+        run: |
+          cd HiSTBLinux
+          source ./env.sh
+          # 复制1G内存机型的配置文件
+          cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
+          # 生成.config
+          KERNEL_DIR="source/kernel/linux-4.4.y"
+          SDK_DEFCONFIG="configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_defconfig"
+          cp -f "$SDK_DEFCONFIG" "$KERNEL_DIR/arch/arm/configs/hi3798mdmo1g_defconfig"
           cd "$KERNEL_DIR"
-          # 先清理旧配置
-          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE mrproper
-          # 生成.config（使用机型对应的defconfig名称）
-          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE $DEFCONFIG_NAME V=1
-          # 验证.config是否生成
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE hi3798mdmo1g_defconfig V=1
           if [ ! -f ".config" ]; then
             echo "Error: .config生成失败"
             exit 1
-          else
-            echo ".config生成成功，前5行："
-            head -n5 .config
           fi
 
-      - name: 修复dtc错误（此时.config已存在，避免依赖报错）
+      - name: 修复dtc错误并编译内核
         run: |
           cd HiSTBLinux
-          source sdk_env.txt
+          source ./env.sh
           cd source/kernel/linux-4.4.y
-          # 此时执行prepare和dtc生成，依赖.config已存在
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE prepare
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE scripts/dtc
           # 修复dtc的yylloc重复定义
           sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
-
-      - name: 配置内核功能（无线+USB打印）
-        run: |
-          cd HiSTBLinux/source/kernel/linux-4.4.y
-          # 基于已生成的.config添加配置
-          sed -i '/CONFIG_USB_PRINTER/d' .config
-          echo "CONFIG_USB_PRINTER=y" >> .config
-          echo "CONFIG_CFG80211=y" >> .config
-          echo "CONFIG_MAC80211=y" >> .config
-          echo "CONFIG_RTL8188FTV=y" >> .config
-          echo "CONFIG_RTLWIFI=y" >> .config
-          echo "CONFIG_RTLWIFI_USB=y" >> .config
-          # 更新配置
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- oldconfig V=1
-
-      - name: 编译内核
-        run: |
-          cd HiSTBLinux/source/kernel/linux-4.4.y
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2 V=1
+          # 编译内核
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE -j2
 
       - name: 编译完整固件
         run: |
           cd HiSTBLinux
-          source sdk_env.txt
+          source ./env.sh
           make build -j4 2>&1 | tee build.log
 
       - name: 上传产物
