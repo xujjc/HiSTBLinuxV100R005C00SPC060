@@ -18,25 +18,31 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装编译依赖并修复sh链接
+      - name: 安装依赖（含指定版本make）
         run: |
           sudo apt update
-          # 安装依赖
-          sudo apt install -y gcc-arm-linux-gnueabihf make gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
-          # 关键修复：将sh强制指向bash（解决脚本语法错误）
+          # 卸载系统默认的make 4.3
+          sudo apt remove -y make
+          # 安装依赖工具
+          sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential wget
+          # 手动下载并安装make 3.81（脚本要求的版本）
+          wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
+          sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
+          # 修复sh链接为bash
           sudo ln -sf /bin/bash /bin/sh
+          # 验证make版本
+          make --version
 
-      - name: 准备RT8188FTV驱动源码（兼容内核4.4）
+      - name: 准备RT8188FTV驱动源码
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/rtl8188ftv
           git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
 
-      - name: 初始化SDK环境（修复脚本执行）
+      - name: 初始化SDK环境（兼容make 3.81）
         run: |
           cd HiSTBLinux
-          # 用bash执行安装脚本（避免sh兼容问题）
-          bash server_install.sh
+          bash server_install.sh  # 此时make版本符合要求，可正常执行
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
           env > sdk_env.txt
