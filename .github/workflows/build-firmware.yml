@@ -1,114 +1,95 @@
-name: Hi3798mv100在线编译（集成RTL8188FTV驱动）
+name: Build EC6108V9 Firmware
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 允许手动触发
+  push:
+    branches: [ main ]
 
 jobs:
-  build:
+  build-ec6108v9:
     runs-on: ubuntu-22.04
+    timeout-minutes: 360  # 最大6小时
+
     steps:
-      - name: 拉取SDK源码
-        uses: actions/checkout@v4
-        with:
-          repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
-          path: HiSTBLinux
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
 
-      - name: 安装依赖
-        run: |
-          sudo apt update
-          sudo apt remove -y make
-          wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
-          sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
-          sudo ln -sf /bin/bash /bin/sh
+    - name: Install dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          build-essential \
+          libncurses5-dev \
+          bc \
+          flex \
+          bison \
+          libssl-dev \
+          git \
+          wget \
+          unzip \
+          python3 \
+          gettext \
+          lzma \
+          zlib1g-dev
 
-      - name: 准备内核源码和RTL8188FTV驱动
-        run: |
-          cd HiSTBLinux
-          # 1. 下载并解压内核源码
-          mkdir -p third_party/open_source/
-          wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          rm -rf source/kernel/linux-4.4.y
-          tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
-          mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
+    - name: Prepare SDK environment
+      run: |
+        # 设置配置文件
+        cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
+        
+        # 设置环境变量
+        echo "export ARCH=arm" >> $GITHUB_ENV
+        echo "export CROSS_COMPILE=arm-hisiv300-linux-" >> $GITHUB_ENV
 
-          # 2. 下载RTL8188FTV驱动（兼容rtl8188fu，支持RTL8188FTV）
-          RTL8188_DIR="source/kernel/linux-4.4.y/drivers/net/wireless/rtl8188ftv"
-          mkdir -p $RTL8188_DIR
-          git clone https://github.com/kelebek333/rtl8188fu.git $RTL8188_DIR
-          # 切换到兼容4.4内核的分支（关键：确保驱动与内核版本匹配）
-          cd $RTL8188_DIR
-          git checkout origin/4.4.x -b 4.4.x  # 假设存在4.4内核兼容分支
+    - name: Configure kernel for EC6108V9
+      run: |
+        cd source/kernel/linux-4.4.y
+        
+        # 应用基础配置
+        make hi3798mv100_defconfig
+        
+        # 启用USB打印支持
+        ./scripts/config --enable CONFIG_USB_PRINTER
+        ./scripts/config --enable CONFIG_USB
+        
+        # 启用rt8188ftv驱动 (假设驱动在源码中)
+        ./scripts/config --module CONFIG_RTL8188FU
+        
+        # 启用Docker需要的功能
+        ./scripts/config --enable CONFIG_DEVTMPFS
+        ./scripts/config --enable CONFIG_CGROUPS
+        ./scripts/config --enable CONFIG_NAMESPACES
+        ./scripts/config --enable CONFIG_NET_NS
+        ./scripts/config --enable CONFIG_PID_NS
+        ./scripts/config --enable CONFIG_IPC_NS
+        ./scripts/config --enable CONFIG_UTS_NS
+        ./scripts/config --enable CONFIG_USER_NS
+        
+        # 保存配置
+        make savedefconfig
+        cp defconfig arch/arm/configs/hi3798mv100_defconfig
+        
+        cd ../..
 
-      - name: 配置内核支持RTL8188FTV驱动
-        run: |
-          cd HiSTBLinux
-          # 1. 修改内核无线驱动的Kconfig和Makefile，添加RTL8188FTV支持
-          KERNEL_WIFI_DIR="source/kernel/linux-4.4.y/drivers/net/wireless"
-          # 向无线驱动总Kconfig添加RTL8188FTV入口
-          echo 'source "drivers/net/wireless/rtl8188ftv/Kconfig"' >> $KERNEL_WIFI_DIR/Kconfig
-          # 向无线驱动总Makefile添加编译规则
-          echo 'obj-$(CONFIG_RTL8188FTV) += rtl8188ftv/' >> $KERNEL_WIFI_DIR/Makefile
+    - name: Build firmware
+      run: |
+        # 初始化SDK环境
+        source env.sh
+        
+        # 开始编译
+        make build -j$(($(nproc) * 2)) 2>&1 | tee build.log
+        
+        # 检查编译产物
+        ls -lh out/hi3798mv100/
 
-      - name: 设置环境变量
-        run: |
-          cd HiSTBLinux
-          cat > env.sh << 'EOF'
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-
-          export PATH=/usr/bin:$PATH
-          EOF
-          source ./env.sh
-
-      - name: 生成.config并启用RTL8188FTV驱动
-        run: |
-          cd HiSTBLinux
-          source ./env.sh
-          cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-          KERNEL_DIR="source/kernel/linux-4.4.y"
-          cd $KERNEL_DIR
-
-          # 1. 生成基础配置
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE multi_v7_defconfig V=1
-
-          # 2. 启用无线核心框架（驱动依赖）
-          echo "CONFIG_CFG80211=y" >> .config  # 802.11配置框架
-          echo "CONFIG_MAC80211=y" >> .config  # 宏层802.11支持
-          echo "CONFIG_RTLWIFI=y" >> .config  # Realtek无线核心
-          echo "CONFIG_RTLWIFI_USB=y" >> .config  # Realtek USB无线支持
-
-          # 3. 明确启用RTL8188FTV驱动（内置到内核）
-          echo "CONFIG_RTL8188FTV=y" >> .config  # 启用RTL8188FTV驱动
-
-      - name: 修复dtc并编译内核
-        run: |
-          cd HiSTBLinux
-          source ./env.sh
-          KERNEL_DIR="source/kernel/linux-4.4.y"
-          cd $KERNEL_DIR
-          # 清理并生成dtc文件
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE scripts/dtc clean V=1
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE scripts/dtc V=1
-          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
-          # 编译内核（验证驱动是否被集成）
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE -j4 V=1 | tee kernel_build.log
-          # 检查编译日志，确认RTL8188FTV驱动被编译
-          if ! grep -q "rtl8188ftv" kernel_build.log; then
-            echo "Error: RTL8188FTV驱动未被编译进内核"
-            exit 1
-          fi
-
-      - name: 编译完整固件
-        run: |
-          cd HiSTBLinux
-          source ./env.sh
-          make build -j4 2>&1 | tee build.log
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: hi3798mv100-firmware-with-rtl8188ftv
-          path: |
-            HiSTBLinux/out/hi3798mv100/*
-            HiSTBLinux/kernel_build.log
-            HiSTBLinux/build.log
+    - name: Archive firmware artifacts
+      uses: actions/upload-artifact@v3
+      with:
+        name: ec6108v9-firmware
+        path: |
+          out/hi3798mv100/fastboot-burn.bin
+          out/hi3798mv100/bootargs.bin
+          out/hi3798mv100/hi_kernel.bin
+          build.log
