@@ -1,4 +1,4 @@
-name: Hi3798mv100在线编译（修复defconfig不存在问题）
+name: Hi3798mv100在线编译（修复dtc-lexer.lex.c缺失问题）
 
 on:
   workflow_dispatch:
@@ -13,15 +13,17 @@ jobs:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖
+      - name: 安装依赖（确保flex可用）
         run: |
           sudo apt update
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
+          # 确保flex（生成dtc-lexer.lex.c的工具）已安装
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           sudo ln -sf /bin/bash /bin/sh
-          arm-linux-gnueabihf-gcc --version | head -n1
+          # 验证flex版本
+          flex --version
 
       - name: 准备内核源码
         run: |
@@ -43,43 +45,44 @@ jobs:
           source ./env.sh
           echo "环境变量：ARCH=$ARCH, CROSS_COMPILE=$CROSS_COMPILE"
 
-      - name: 复制机型配置并选择defconfig（核心修复）
+      - name: 生成.config
         run: |
           cd HiSTBLinux
           source ./env.sh
-          # 复制机型配置
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-
-          # 1. 检查内核配置目录中的defconfig
           KERNEL_DIR="source/kernel/linux-4.4.y"
-          KERNEL_DEFCONFIG_DIR="$KERNEL_DIR/arch/arm/configs"
-          echo "=== 内核配置目录文件（可用defconfig） ==="
-          ls -la $KERNEL_DEFCONFIG_DIR  # 列出所有可用defconfig
-
-          # 2. 若hi3798mv100_defconfig不存在，使用ARM通用配置（multi_v7_defconfig）
-          TARGET_DEFCONFIG="hi3798mv100_defconfig"
-          if [ ! -f "$KERNEL_DEFCONFIG_DIR/$TARGET_DEFCONFIG" ]; then
-            echo "未找到$TARGET_DEFCONFIG，使用ARM通用配置"
-            TARGET_DEFCONFIG="multi_v7_defconfig"  # ARMv7通用配置，兼容Hi3798mv100
-          fi
-          echo "使用defconfig：$TARGET_DEFCONFIG"
-
-          # 3. 生成.config文件
           cd $KERNEL_DIR
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE $TARGET_DEFCONFIG V=1
-          if [ ! -f ".config" ]; then
-            echo "Error: .config生成失败"
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE multi_v7_defconfig V=1
+
+      - name: 生成dtc文件并修复（核心修复）
+        run: |
+          cd HiSTBLinux
+          source ./env.sh
+          KERNEL_DIR="source/kernel/linux-4.4.y"
+          cd $KERNEL_DIR
+          
+          # 1. 确保dtc目录存在
+          DTC_DIR="scripts/dtc"
+          if [ ! -d "$DTC_DIR" ]; then
+            echo "Error: dtc目录不存在，内核源码不完整"
             exit 1
           fi
-
-      - name: 修复dtc错误
-        run: |
-          cd HiSTBLinux
-          source ./env.sh
-          cd source/kernel/linux-4.4.y
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE prepare
-          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE scripts/dtc
-          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
+          
+          # 2. 生成dtc-lexer.lex.c（依赖flex）
+          echo "生成dtc相关文件（包括dtc-lexer.lex.c）..."
+          make ARCH=$ARCH CROSS_COMPILE=$CROSS_COMPILE scripts/dtc V=1 2>&1 | tee dtc_build.log
+          
+          # 3. 检查dtc-lexer.lex.c是否生成
+          TARGET_FILE="$DTC_DIR/dtc-lexer.lex.c"
+          if [ ! -f "$TARGET_FILE" ]; then
+            echo "Error: dtc-lexer.lex.c未生成，生成日志："
+            cat dtc_build.log
+            exit 1
+          fi
+          
+          # 4. 修复yylloc重复定义
+          sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' "$TARGET_FILE"
+          echo "dtc修复完成"
 
       - name: 配置内核功能
         run: |
@@ -87,7 +90,6 @@ jobs:
           source ./env.sh
           cd source/kernel/linux-4.4.y
           echo "CONFIG_DEVTMPFS=y" >> .config
-          echo "CONFIG_DEVTMPFS_MOUNT=y" >> .config
           echo "CONFIG_CGROUPS=y" >> .config
           echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_RTL8188FTV=y" >> .config
