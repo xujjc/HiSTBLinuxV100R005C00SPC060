@@ -1,4 +1,4 @@
-name: 编译Hi3798mv100固件（最终修复版）
+name: 编译Hi3798mv100固件（解决dtc链接错误）
 
 on:
   push:
@@ -25,55 +25,48 @@ jobs:
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
-          # 安装其他依赖（包含lzma等）
+          # 安装其他依赖
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
           # 修复sh指向bash
           sudo ln -sf /bin/bash /bin/sh
-          # 验证版本
-          make --version | head -n1
-          bash --version | head -n1
 
-      - name: 手动下载Linux 4.4内核源码（关键修复）
+      - name: 下载内核源码并修复dtc错误
         run: |
           cd HiSTBLinux
-          # 创建目录并下载内核源码包
+          # 下载内核源码
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          # 验证文件是否下载成功
-          ls -l third_party/open_source/linux-4.4.35.tar.gz
+          # 解压内核源码（提前解压以便打补丁）
+          tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
+          mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y  # 重命名为SDK预期目录
+          # 应用dtc符号冲突补丁（修复yylloc重复定义）
+          wget https://raw.githubusercontent.com/torvalds/linux/master/scripts/dtc/dtc-lexer.lex.c -O source/kernel/linux-4.4.y/scripts/dtc/dtc-lexer.lex.c
+          wget https://raw.githubusercontent.com/torvalds/linux/master/scripts/dtc/dtc-parser.tab.c -O source/kernel/linux-4.4.y/scripts/dtc/dtc-parser.tab.c
 
-      - name: 准备RT8188FTV无线驱动
+      - name: 准备RT8188FTV驱动
         run: |
           cd HiSTBLinux
           mkdir -p third_party/open_source/rtl8188ftv
           git clone https://github.com/kelebek333/rtl8188fu.git third_party/open_source/rtl8188ftv
 
-      - name: 初始化SDK并编译内核目录
+      - name: 初始化SDK并编译内核
         run: |
           cd HiSTBLinux
-          # 初始化SDK环境
           bash server_install.sh
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
           source ./env.sh
-          # 编译内核（此时内核源码已存在，可正常解压）
+          # 编译内核（此时dtc已修复）
           make linux -j2
           # 保存环境变量
-          env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^SDK_PATH|^PATH|^CC|^LD' > sdk_env.txt
+          env | grep -E '^ARCH|^CROSS_COMPILE|^KERNELDIR|^SDK_PATH|^PATH' > sdk_env.txt
 
-      - name: 配置内核（支持无线+USB打印）
+      - name: 配置内核功能
         run: |
           cd HiSTBLinux
           source sdk_env.txt
           cd source/kernel/linux-4.4.y
-          # 加载基础配置
-          if [ -f "../../../../hi3798mv100_defconfig" ]; then
-            cp ../../../../hi3798mv100_defconfig arch/arm/configs/
-          else
-            echo "使用内核默认配置"
-          fi
+          # 加载配置并修改
           make ARCH=arm hi3798mv100_defconfig
-          
-          # 添加必要配置
           sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB=y" >> .config
           echo "CONFIG_USB_UHCI_HCD=y" >> .config
@@ -93,10 +86,7 @@ jobs:
           echo "CONFIG_RTLWIFI_USB=y" >> .config
           echo "CONFIG_WIRELESS_EXT=y" >> .config
           echo "CONFIG_WEXT_CORE=y" >> .config
-          
-          # 保存配置并重新编译内核
-          make ARCH=arm savedefconfig
-          cp defconfig arch/arm/configs/hi3798mv100_defconfig
+          # 重新编译内核
           make ARCH=arm -j2
 
       - name: 编译完整固件
@@ -109,7 +99,7 @@ jobs:
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
-          name: hi3798mv100-firmware-complete
+          name: hi3798mv100-firmware-dtc-fixed
           path: |
             HiSTBLinux/out/hi3798mv100/*
             HiSTBLinux/build.log
