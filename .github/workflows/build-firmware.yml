@@ -1,109 +1,128 @@
-name: 编译Hi3798mv100固件（解决defconfig文件不存在问题）
+name: Hi3798mv100在线编译固件
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发编译
 
 jobs:
   build:
     runs-on: ubuntu-22.04
-
     steps:
-      - name: 拉取源码
+      - name: 拉取SDK源码
         uses: actions/checkout@v4
         with:
           repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
           path: HiSTBLinux
 
-      - name: 安装依赖
+      - name: 安装编译依赖
         run: |
           sudo apt update
+          # 降级make至3.81（SDK兼容版本）
           sudo apt remove -y make
           wget http://archive.ubuntu.com/ubuntu/pool/main/m/make-dfsg/make_3.81-8.2ubuntu3_amd64.deb
           sudo dpkg -i make_3.81-8.2ubuntu3_amd64.deb
+          # 安装交叉编译工具链及依赖
           sudo apt install -y gcc-arm-linux-gnueabihf gettext bison flex bc zlib1g-dev libncurses5-dev lzma git build-essential
-          sudo ln -sf /bin/bash /bin/sh
+          sudo ln -sf /bin/bash /bin/sh  # 修复sh指向bash
 
       - name: 准备内核源码
         run: |
           cd HiSTBLinux
+          # 下载并解压Linux 4.4内核
           mkdir -p third_party/open_source/
           wget https://www.kernel.org/pub/linux/kernel/v4.x/linux-4.4.35.tar.gz -O third_party/open_source/linux-4.4.35.tar.gz
-          rm -rf source/kernel/linux-4.4.y
+          rm -rf source/kernel/linux-4.4.y  # 清理旧目录
           tar -zxf third_party/open_source/linux-4.4.35.tar.gz -C source/kernel/
           mv source/kernel/linux-4.4.35 source/kernel/linux-4.4.y
 
-      - name: 修复环境变量
+      - name: 修复环境变量（核心）
         run: |
           cd HiSTBLinux
-          bash server_install.sh || echo "忽略非致命警告"
-          # 手动生成env.sh确保变量正确
+          # 手动生成env.sh，避免SDK脚本缺陷
           cat > env.sh << 'EOF'
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          export PATH=/usr/bin:$PATH
+          export PATH=/usr/bin:$PATH  # 交叉编译器路径
           export SDK_PATH=$(pwd)
+          export KERNELDIR=$(pwd)/source/kernel/linux-4.4.y
           EOF
+          # 验证环境变量
           source ./env.sh
-          echo "ARCH: $ARCH, CROSS_COMPILE: $CROSS_COMPILE"
+          echo "当前环境变量："
+          echo "ARCH: $ARCH"
+          echo "CROSS_COMPILE: $CROSS_COMPILE"
 
-      - name: 动态查找defconfig并生成.config（核心修复）
+      - name: 复制机型配置并定位defconfig
         run: |
           cd HiSTBLinux
           source ./env.sh
-          # 1. 复制机型配置文件（cfg.mak）
+          # 1. 复制1G内存机型配置（hi3798mdmo1g）
           cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
 
-          # 2. 列出configs目录内容，找到实际的defconfig文件名
-          SDK_DEFCONFIG_DIR="configs/hi3798mv100"
-          echo "=== SDK配置目录文件（寻找defconfig） ==="
-          ls -la $SDK_DEFCONFIG_DIR
-          # 查找包含"hi3798mv100"或"hi3798mdmo1g"的defconfig文件
-          SDK_DEFCONFIG=$(find $SDK_DEFCONFIG_DIR -name "*.defconfig" | grep -E 'hi3798mv100|hi3798mdmo1g' | head -n1)
-
-          # 3. 验证defconfig是否存在
-          if [ -z "$SDK_DEFCONFIG" ] || [ ! -f "$SDK_DEFCONFIG" ]; then
-            echo "Error: 未找到有效的defconfig文件"
-            exit 1
-          fi
-          echo "找到defconfig：$SDK_DEFCONFIG"
-
-          # 4. 复制defconfig到内核配置目录
+          # 2. 从内核目录寻找defconfig（SDK的defconfig在内核源码中）
           KERNEL_DIR="source/kernel/linux-4.4.y"
-          DEFCONFIG_NAME=$(basename $SDK_DEFCONFIG)  # 使用实际文件名
-          mkdir -p $KERNEL_DIR/arch/arm/configs/
-          cp -f $SDK_DEFCONFIG $KERNEL_DIR/arch/arm/configs/
-          echo "复制defconfig到内核目录：$KERNEL_DIR/arch/arm/configs/$DEFCONFIG_NAME"
+          KERNEL_DEFCONFIG_DIR="$KERNEL_DIR/arch/arm/configs"
+          echo "内核配置目录文件："
+          ls -la $KERNEL_DEFCONFIG_DIR
 
-          # 5. 生成.config（使用实际defconfig文件名）
+          # 3. 使用芯片专属defconfig（hi3798mv100_defconfig）
+          DEFCONFIG_NAME="hi3798mv100_defconfig"
+          if [ ! -f "$KERNEL_DEFCONFIG_DIR/$DEFCONFIG_NAME" ]; then
+            echo "未找到芯片defconfig，使用通用ARM配置"
+            DEFCONFIG_NAME="multi_v7_defconfig"  # ARMv7通用配置
+          fi
+          echo "使用的defconfig：$DEFCONFIG_NAME"
+
+          # 4. 生成.config文件
           cd $KERNEL_DIR
           make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE $DEFCONFIG_NAME V=1
 
-          # 6. 验证.config是否生成
+          # 5. 验证.config生成
           if [ ! -f ".config" ]; then
             echo "Error: .config生成失败"
             exit 1
-          else
-            echo ".config生成成功"
           fi
 
-      - name: 修复dtc并编译内核
+      - name: 修复dtc工具错误
         run: |
           cd HiSTBLinux/source/kernel/linux-4.4.y
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- prepare
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- scripts/dtc
+          # 生成dtc相关文件
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE prepare
+          make ARCH=arm CROSS_COMPILE=$CROSS_COMPILE scripts/dtc
+          # 注释重复定义的yylloc变量
           sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
-          make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j2
 
-      - name: 编译固件
+      - name: 配置内核功能（Docker+无线+USB打印）
+        run: |
+          cd HiSTBLinux/source/kernel/linux-4.4.y
+          source ../../../env.sh
+          # 开启Docker依赖
+          sed -i 's/# CONFIG_DEVTMPFS is not set/CONFIG_DEVTMPFS=y/' .config
+          sed -i 's/# CONFIG_DEVTMPFS_MOUNT is not set/CONFIG_DEVTMPFS_MOUNT=y/' .config
+          echo "CONFIG_FHANDLE=y" >> .config
+          echo "CONFIG_CGROUPS=y" >> .config
+          echo "CONFIG_CGROUP_DEVICE=y" >> .config
+          echo "CONFIG_CGROUP_CPUACCT=y" >> .config
+
+          # 开启无线和USB打印
+          echo "CONFIG_CFG80211=y" >> .config
+          echo "CONFIG_MAC80211=y" >> .config
+          echo "CONFIG_RTL8188FTV=y" >> .config
+          echo "CONFIG_USB_PRINTER=y" >> .config
+
+      - name: 编译内核和完整固件
         run: |
           cd HiSTBLinux
           source ./env.sh
-          make build -j4 2>&1 | tee build.log
+          # 编译内核
+          make linux -j4 2>&1 | tee kernel_build.log
+          # 编译完整固件（UBoot+内核+根文件系统）
+          make build -j4 2>&1 | tee full_build.log
 
-      - name: 上传产物
+      - name: 上传编译产物
         uses: actions/upload-artifact@v4
         with:
           name: hi3798mv100-firmware
           path: |
-            HiSTBLinux/out/hi3798mv100/*
-            HiSTBLinux/build.log
+            HiSTBLinux/out/hi3798mv100/*  # 固件文件（fastboot-burn.bin等）
+            HiSTBLinux/kernel_build.log
+            HiSTBLinux/full_build.log
