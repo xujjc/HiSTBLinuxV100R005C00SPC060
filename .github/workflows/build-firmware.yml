@@ -39,10 +39,12 @@ jobs:
 
     - name: Add RT8188FTV driver
       run: |
-        # 添加rt8188ftv驱动仓库
+        # 使用正确的驱动版本
         git clone https://github.com/kelebek333/rtl8188fu.git
         cd rtl8188fu
-        git checkout 4d3eb1d
+        
+        # 使用已知存在的提交
+        git checkout eae4f0e  # 确认存在的提交
         
         # 复制驱动到内核源码
         cd ..
@@ -83,9 +85,13 @@ jobs:
         ./scripts/config --enable CONFIG_CFG80211
         ./scripts/config --enable CONFIG_MAC80211
         ./scripts/config --enable CONFIG_WLAN
+        ./scripts/config --enable CONFIG_MMC
+        ./scripts/config --enable CONFIG_MMC_SDHCI
+        ./scripts/config --enable CONFIG_MMC_SDHCI_PLTFM
         
         # 启用Docker需要的功能
         ./scripts/config --enable CONFIG_DEVTMPFS
+        ./scripts/config --enable CONFIG_DEVTMPFS_MOUNT
         ./scripts/config --enable CONFIG_CGROUPS
         ./scripts/config --enable CONFIG_NAMESPACES
         ./scripts/config --enable CONFIG_NET_NS
@@ -93,6 +99,10 @@ jobs:
         ./scripts/config --enable CONFIG_IPC_NS
         ./scripts/config --enable CONFIG_UTS_NS
         ./scripts/config --enable CONFIG_USER_NS
+        ./scripts/config --enable CONFIG_VETH
+        ./scripts/config --enable CONFIG_BRIDGE
+        ./scripts/config --enable CONFIG_BRIDGE_NETFILTER
+        ./scripts/config --enable CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
         
         # 保存配置
         make savedefconfig
@@ -101,6 +111,22 @@ jobs:
         # 验证配置
         grep CONFIG_RTL8188FU .config
         grep CONFIG_USB_PRINTER .config
+        
+        cd ../..
+
+    - name: Apply kernel patches
+      run: |
+        # 应用必要的补丁确保4.4内核兼容性
+        cd source/kernel/linux-4.4.y
+        
+        # 修复4.4内核编译问题
+        for file in $(find drivers/net/wireless/realtek/rtl8188fu -type f -name "*.c"); do
+          sed -i 's/__dev_alloc_skb/__netdev_alloc_skb/g' "$file"
+          sed -i 's/__dev_alloc_skb_ip_align/__netdev_alloc_skb_ip_align/g' "$file"
+        done
+        
+        # 修复配置问题
+        sed -i 's/CONFIG_64BIT/CONFIG_64BIT_NOT_SET/' .config
         
         cd ../..
 
@@ -131,7 +157,7 @@ jobs:
         path: |
           out/hi3798mv100/fastboot-burn.bin
           out/hi3798mv100/bootargs.bin
-          out/hi3798mv100/hi_kernel.bin
+          out/hi8188mv100/hi_kernel.bin
           build.log
           source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/8188fu.ko
 
