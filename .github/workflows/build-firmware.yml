@@ -1,167 +1,74 @@
-name: Build EC6108V9 Firmware with RT8188FTV and USB Printing
+# .github/workflows/ec6108v9-build.yml
+name: EC6108V9 Custom Firmware
 
 on:
-  workflow_dispatch:  # 允许手动触发
   push:
     branches: [ main ]
+  workflow_dispatch:
 
 jobs:
-  build-ec6108v9:
-    runs-on: ubuntu-22.04
-    timeout-minutes: 360  # 最大6小时
-
+  build:
+    runs-on: ubuntu-20.04
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - name: Checkout SDK
+      uses: actions/checkout@v3
       with:
-        submodules: recursive
-        fetch-depth: 0
+        repository: xujjc/HiSTBLinuxV100R005C00SPC060
+        ref: C00SPC060
+        path: sdk
 
-    - name: Install dependencies
+    - name: Install Dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y \
-          build-essential \
-          libncurses5-dev \
-          bc \
-          flex \
-          bison \
-          libssl-dev \
-          git \
-          wget \
-          unzip \
-          python3 \
-          gettext \
-          lzma \
-          zlib1g-dev \
-          kmod \
-          pkg-config
+        sudo apt-get install -y build-essential git wget \
+          libssl-dev bc u-boot-tools device-tree-compiler \
+          flex bison mtd-utils zlib1g-dev
 
-    - name: Add RT8188FTV driver (direct zip download)
+    - name: Setup Toolchain
       run: |
-        # 直接下载驱动源码ZIP文件
-        wget https://github.com/kelebek333/rtl8188fu/archive/main.zip -O rtl8188fu.zip
-        unzip rtl8188fu.zip -d .
-        mv rtl8188fu-main rtl8188fu
-        
-        # 复制驱动到内核源码
-        mkdir -p source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu
-        cp -r rtl8188fu/* source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/
-        
-        # 添加驱动到内核构建系统
-        echo 'source "drivers/net/wireless/realtek/rtl8188fu/Kconfig"' >> source/kernel/linux-4.4.y/drivers/net/wireless/realtek/Kconfig
-        echo 'obj-$(CONFIG_RTL8188FU) += rtl8188fu/' >> source/kernel/linux-4.4.y/drivers/net/wireless/realtek/Makefile
+        wget https://releases.linaro.org/components/toolchain/binaries/7.4-2019.02/arm-linux-gnueabihf/gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf.tar.xz
+        tar -xf gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf.tar.xz
+        echo "${GITHUB_WORKSPACE}/gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf/bin" >> $GITHUB_PATH
 
-    - name: Prepare SDK environment
+    - name: Prepare RTL8188FTV Driver
       run: |
-        # 设置配置文件
+        git clone https://github.com/lwfinger/rtl8188fu.git sdk/drivers/net/wireless/rtl8188fu
+        echo 'obj-$(CONFIG_RTL8188FU) += rtl8188fu/' >> sdk/drivers/net/wireless/Kconfig
+
+    - name: Patch Kernel Config
+      working-directory: sdk
+      run: |
+        # 启用USB打印功能
+        sed -i 's/CONFIG_USB_PRINTER=n/CONFIG_USB_PRINTER=y/' arch/arm/configs/hi3798mv100_defconfig
+        
+        # 添加Docker支持
+        echo "CONFIG_DEVTMPFS=y" >> arch/arm/configs/hi3798mv100_defconfig
+        echo "CONFIG_FHANDLE=y" >> arch/arm/configs/hi3798mv100_defconfig
+        echo "CONFIG_CGROUPS=y" >> arch/arm/configs/hi3798mv100_defconfig
+
+    - name: Configure Build
+      working-directory: sdk
+      run: |
         cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-        
-        # 设置环境变量
-        echo "export ARCH=arm" >> $GITHUB_ENV
-        echo "export CROSS_COMPILE=arm-hisiv300-linux-" >> $GITHUB_ENV
-        echo "export PATH=\$PATH:\$(pwd)/tools/linux/toolchains/arm-hisiv300-linux/bin" >> $GITHUB_ENV
-
-    - name: Configure kernel for EC6108V9
-      run: |
-        cd source/kernel/linux-4.4.y
-        
-        # 应用基础配置
-        make hi3798mv100_defconfig
-        
-        # 启用USB打印支持
-        ./scripts/config --enable CONFIG_USB_PRINTER
-        ./scripts/config --enable CONFIG_USB_SUPPORT
-        ./scripts/config --enable CONFIG_USB_XHCI_HCD
-        ./scripts/config --enable CONFIG_USB_EHCI_HCD
-        ./scripts/config --enable CONFIG_USB_OHCI_HCD
-        ./scripts/config --enable CONFIG_USB_STORAGE
-        
-        # 启用rt8188ftv驱动
-        ./scripts/config --module CONFIG_RTL8188FU
-        ./scripts/config --enable CONFIG_CFG80211
-        ./scripts/config --enable CONFIG_MAC80211
-        ./scripts/config --enable CONFIG_WLAN
-        ./scripts/config --enable CONFIG_MMC
-        ./scripts/config --enable CONFIG_MMC_SDHCI
-        ./scripts/config --enable CONFIG_MMC_SDHCI_PLTFM
-        
-        # 启用Docker需要的功能
-        ./scripts/config --enable CONFIG_DEVTMPFS
-        ./scripts/config --enable CONFIG_DEVTMPFS_MOUNT
-        ./scripts/config --enable CONFIG_CGROUPS
-        ./scripts/config --enable CONFIG_NAMESPACES
-        ./scripts/config --enable CONFIG_NET_NS
-        ./scripts/config --enable CONFIG_PID_NS
-        ./scripts/config --enable CONFIG_IPC_NS
-        ./scripts/config --enable CONFIG_UTS_NS
-        ./scripts/config --enable CONFIG_USER_NS
-        ./scripts/config --enable CONFIG_VETH
-        ./scripts/config --enable CONFIG_BRIDGE
-        ./scripts/config --enable CONFIG_BRIDGE_NETFILTER
-        ./scripts/config --enable CONFIG_NETFILTER_XT_MATCH_ADDRTYPE
-        
-        # 保存配置
-        make savedefconfig
-        cp defconfig arch/arm/configs/hi3798mv100_defconfig
-        
-        cd ../..
-
-    - name: Apply kernel patches
-      run: |
-        # 应用必要的补丁确保4.4内核兼容性
-        cd source/kernel/linux-4.4.y
-        
-        # 修复4.4内核编译问题
-        for file in $(find drivers/net/wireless/realtek/rtl8188fu -type f -name "*.c"); do
-          sed -i 's/__dev_alloc_skb/__netdev_alloc_skb/g' "$file"
-          sed -i 's/__dev_alloc_skb_ip_align/__netdev_alloc_skb_ip_align/g' "$file"
-        done
-        
-        # 添加缺失的头文件
-        sed -i '1i #include <linux/version.h>' drivers/net/wireless/realtek/rtl8188fu/core/rtw_br_ext.c
-        sed -i '1i #include <linux/ieee80211.h>' drivers/net/wireless/realtek/rtl8188fu/core/rtw_mlme_ext.c
-        
-        # 修复编译错误
-        sed -i 's/ieee80211_is_robust_mgmt_frame/skb_frag_size_robust/g' drivers/net/wireless/realtek/rtl8188fu/os_dep/linux/ioctl_cfg80211.c
-        
-        cd ../..
-
-    - name: Build firmware
-      run: |
-        # 初始化SDK环境
         source env.sh
-        
-        # 开始编译
-        make build -j$(nproc) 2>&1 | tee build.log
-        
-        # 检查编译产物
-        ls -lh out/hi3798mv100/
+        make ARCH=arm hi3798mv100_defconfig
 
-    - name: Verify RT8188FTV driver
+    - name: Build Firmware
+      working-directory: sdk
       run: |
-        # 检查驱动是否编译成功
-        if [ -f "source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/8188fu.ko" ]; then
-          echo "RT8188FTV driver found!"
-        else
-          echo "RT8188FTV driver not found!"
-          find source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu -name "*.ko" -ls
-          exit 1
-        fi
+        make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j$(nproc)
+        ./scripts/build_firmware.sh ec6108v9
 
-    - name: Archive firmware artifacts
+    - name: Package Artifacts
+      working-directory: sdk/output
+      run: |
+        tar -czvf ec6108v9-firmware-$(date +%Y%m%d).tar.gz \
+          uImage \
+          rootfs.img \
+          drivers/net/wireless/rtl8188fu/8188fu.ko
+
+    - name: Upload Artifacts
       uses: actions/upload-artifact@v4
       with:
         name: ec6108v9-firmware
-        path: |
-          out/hi3798mv100/fastboot-burn.bin
-          out/hi3798mv100/bootargs.bin
-          out/hi3798mv100/hi_kernel.bin
-          build.log
-          source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu/8188fu.ko
-
-    - name: Upload kernel config
-      uses: actions/upload-artifact@v4
-      with:
-        name: kernel-config
-        path: source/kernel/linux-4.4.y/.config
+        path: sdk/output/*.tar.gz
