@@ -29,7 +29,7 @@ jobs:
           make hi3798mv100_defconfig
           make menuconfig -silentoldconfig <<EOF
           # 交互式配置选项
-EOF
+          EOF
 
       - name: 启用 RTL8188FTV 驱动
         run: |
