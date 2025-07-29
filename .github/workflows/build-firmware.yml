@@ -1,74 +1,129 @@
-# .github/workflows/ec6108v9-build.yml
-name: EC6108V9 Custom Firmware
+name: Hi3798mv100在线编译（保留USB打印+集成RTL8188FTV）
 
 on:
-  push:
-    branches: [ main ]
   workflow_dispatch:
 
 jobs:
   build:
-    runs-on: ubuntu-20.04
-    steps:
-    - name: Checkout SDK
-      uses: actions/checkout@v3
-      with:
-        repository: xujjc/HiSTBLinuxV100R005C00SPC060
-        ref: C00SPC060
-        path: sdk
+    runs-on: ubuntu-22.04
+    env:
+      KERNEL_VERSION: 4.4.35
+      DRIVER_REPO: kelebek333/rtl8188fu
+      DRIVER_BRANCH: 4.4.x
+      ARCH: arm
+      CROSS_COMPILE: arm-linux-gnueabihf-
 
-    - name: Install Dependencies
+    steps:
+    - name: 缓存内核源码
+      uses: actions/cache@v3
+      with:
+        path: |
+          HiSTBLinux/source/kernel/linux-4.4.y
+          third_party/open_source
+        key: kernel-${{ env.KERNEL_VERSION }}-${{ hashFiles('third_party/open_source/linux-4.4.35.tar.gz') }}
+
+    - name: 拉取源码
+      uses: actions/checkout@v4
+      with:
+        repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
+        path: HiSTBLinux
+
+    - name: 安装依赖
       run: |
         sudo apt-get update
-        sudo apt-get install -y build-essential git wget \
-          libssl-dev bc u-boot-tools device-tree-compiler \
-          flex bison mtd-utils zlib1g-dev
+        sudo apt-get install -y --no-install-recommends \
+          make=3.81-8.2ubuntu3 \
+          gcc-arm-linux-gnueabihf \
+          gettext bison flex bc \
+          zlib1g-dev libncurses5-dev \
+          lzma git build-essential
+        sudo ln -sf /bin/bash /bin/sh
 
-    - name: Setup Toolchain
+    - name: 准备内核与驱动
       run: |
-        wget https://releases.linaro.org/components/toolchain/binaries/7.4-2019.02/arm-linux-gnueabihf/gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf.tar.xz
-        tar -xf gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf.tar.xz
-        echo "${GITHUB_WORKSPACE}/gcc-linaro-7.4.1-2019.02-x86_64_arm-linux-gnueabihf/bin" >> $GITHUB_PATH
-
-    - name: Prepare RTL8188FTV Driver
-      run: |
-        git clone https://github.com/lwfinger/rtl8188fu.git sdk/drivers/net/wireless/rtl8188fu
-        echo 'obj-$(CONFIG_RTL8188FU) += rtl8188fu/' >> sdk/drivers/net/wireless/Kconfig
-
-    - name: Patch Kernel Config
-      working-directory: sdk
-      run: |
-        # 启用USB打印功能
-        sed -i 's/CONFIG_USB_PRINTER=n/CONFIG_USB_PRINTER=y/' arch/arm/configs/hi3798mv100_defconfig
+        cd HiSTBLinux
+        mkdir -p third_party/open_source/
         
-        # 添加Docker支持
-        echo "CONFIG_DEVTMPFS=y" >> arch/arm/configs/hi3798mv100_defconfig
-        echo "CONFIG_FHANDLE=y" >> arch/arm/configs/hi3798mv100_defconfig
-        echo "CONFIG_CGROUPS=y" >> arch/arm/configs/hi3798mv100_defconfig
+        # 下载内核源码
+        wget -nc https://www.kernel.org/pub/linux/kernel/v4.x/linux-${{ env.KERNEL_VERSION }}.tar.gz \
+          -O third_party/open_source/linux-${{ env.KERNEL_VERSION }}.tar.gz
+        
+        # 解压内核
+        tar -zxf third_party/open_source/linux-${{ env.KERNEL_VERSION }}.tar.gz \
+          -C source/kernel/ --transform 's|linux-${{ env.KERNEL_VERSION }}|linux-4.4.y|'
+        
+        # 克隆驱动（使用浅层克隆）
+        git clone --depth 1 --branch ${{ env.DRIVER_BRANCH }} \
+          https://github.com/${{ env.DRIVER_REPO }}.git \
+          source/kernel/linux-4.4.y/drivers/net/wireless/rtl8188ftv
 
-    - name: Configure Build
-      working-directory: sdk
+    - name: 配置内核
       run: |
+        cd HiSTBLinux
+        KERNEL_WIFI_DIR="source/kernel/linux-4.4.y/drivers/net/wireless"
+        
+        # 添加驱动配置
+        sed -i '/^source "drivers\/net\/wireless\/\*/a source "drivers/net/wireless/rtl8188ftv/Kconfig"' \
+          $KERNEL_WIFI_DIR/Kconfig
+        
+        sed -i '/^obj-\$(CONFIG_RTLWIFI)/a obj-\$(CONFIG_RTL8188FTV) += rtl8188ftv/' \
+          $KERNEL_WIFI_DIR/Makefile
+
+    - name: 生成配置文件
+      run: |
+        cd HiSTBLinux
         cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-        source env.sh
-        make ARCH=arm hi3798mv100_defconfig
+        
+        cd source/kernel/linux-4.4.y
+        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} multi_v7_defconfig
+        
+        # 配置无线驱动
+        cat >> .config << EOF
+        CONFIG_CFG80211=y
+        CONFIG_MAC80211=y
+        CONFIG_RTLWIFI=y
+        CONFIG_RTLWIFI_USB=y
+        CONFIG_RTL8188FTV=y
+        
+        # USB打印配置
+        CONFIG_USB=y
+        CONFIG_USB_UHCI_HCD=y
+        CONFIG_USB_OHCI_HCD=y
+        CONFIG_USB_EHCI_HCD=y
+        CONFIG_USB_PRINTER=y
+        EOF
+        
+        # 验证配置
+        for config in USB=y USB_PRINTER=y EHCI_HCD=y; do
+          if ! grep -q "CONFIG_${config}" .config; then
+            echo "配置验证失败: CONFIG_${config}"
+            exit 1
+          fi
+        done
 
-    - name: Build Firmware
-      working-directory: sdk
+    - name: 编译内核
       run: |
-        make ARCH=arm CROSS_COMPILE=arm-linux-gnueabihf- -j$(nproc)
-        ./scripts/build_firmware.sh ec6108v9
+        cd HiSTBLinux/source/kernel/linux-4.4.y
+        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+          scripts/dtc -j$(nproc)
+        
+        # 修复dtc语法问题
+        sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
+        
+        # 编译内核
+        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
+          -j$(nproc) V=1 2>&1 | tee kernel.log
 
-    - name: Package Artifacts
-      working-directory: sdk/output
+    - name: 编译固件
       run: |
-        tar -czvf ec6108v9-firmware-$(date +%Y%m%d).tar.gz \
-          uImage \
-          rootfs.img \
-          drivers/net/wireless/rtl8188fu/8188fu.ko
+        cd HiSTBLinux
+        make build -j$(nproc) 2>&1 | tee build.log
 
-    - name: Upload Artifacts
+    - name: 上传产物
       uses: actions/upload-artifact@v4
       with:
-        name: ec6108v9-firmware
-        path: sdk/output/*.tar.gz
+        name: hi3798mv100-firmware-${{ github.run_id }}
+        path: |
+          HiSTBLinux/out/hi3798mv100/*
+          HiSTBLinux/**/*.log
+        retention-days: 7
