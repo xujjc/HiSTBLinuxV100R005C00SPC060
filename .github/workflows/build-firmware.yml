@@ -1,73 +1,165 @@
-name: Hi3798MV100 固件编译
+name: EC6108V9 Ubuntu 固件全自动编译
 
 on:
   push:
-    branches: [main]
-  workflow_dispatch:
+    branches: [ main ]
+  workflow_dispatch:  # 允许手动触发
 
 jobs:
   build:
     runs-on: ubuntu-22.04
     steps:
-      - name: 检出代码
-        uses: actions/checkout@v4
-        with:
-          submodules: true
+      - name: 初始化编译目录
+        run: |
+          mkdir -p hi3798mv100-ubuntu
+          cd hi3798mv100-ubuntu
+          mkdir -p kernel u-boot rootfs driver output
 
-      - name: 安装基础依赖
+      - name: 拉取内核源码（Hi3798MV100 适配版）
+        run: |
+          cd hi3798mv100-ubuntu/kernel
+          git clone https://github.com/ophub/kernel.git .
+          git checkout origin/main -b hisilicon-hi3798mv100
+
+      - name: 拉取 U-Boot 源码（海思芯片适配）
+        run: |
+          cd hi3798mv100-ubuntu/u-boot
+          git clone https://github.com/JeffyCN/u-boot-hisilicon.git .
+          git checkout origin/hi3798mv100 -b ec6108v9
+
+      - name: 拉取 RTL8188FTV 驱动源码
+        run: |
+          cd hi3798mv100-ubuntu/driver
+          git clone https://github.com/lwfinger/rtlwifi_new.git rtl8188ftv
+          cd rtl8188ftv
+          git checkout origin/master
+
+      - name: 安装编译依赖
         run: |
           sudo apt update
-          sudo apt install -y build-essential libncurses5-dev libssl-dev \
-            git wget unzip flex bison make gcc g++ python3
+          sudo apt install -y build-essential crossbuild-essential-armhf \
+            gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf \
+            git wget unzip flex bison make libncurses5-dev libssl-dev \
+            u-boot-tools device-tree-compiler parted dosfstools \
+            qemu-user-static chroot debootstrap
 
-      - name: 下载工具链并生成 env.sh
+      - name: 下载并配置工具链
         run: |
-          # 下载工具链
-          wget https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
-          sudo tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
-          # 生成 env.sh，加入特殊标记变量（可能被脚本检测）
-          cat > ./env.sh <<'EOF'
+          wget https://releases.linaro.org/components/toolchain/binaries/9.5-2021.10/arm-linux-gnueabihf/gcc-linaro-9.5.0-2021.10-x86_64_arm-linux-gnueabihf.tar.xz
+          sudo tar -xf gcc-linaro-9.5.0-2021.10-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
+          echo "PATH=/opt/gcc-linaro-9.5.0-2021.10-x86_64_arm-linux-gnueabihf/bin:$PATH" >> $GITHUB_ENV
+
+      - name: 生成环境配置脚本
+        run: |
+          cd hi3798mv100-ubuntu
+          cat > ./env.sh <<EOF
           #!/bin/bash
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          export PATH=$PATH:/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin
-          export KERNEL_SRC=$(pwd)
-          export ENV_LOADED=1  # 新增标记变量，可能被 base.mak 检测
+          export PATH=\$PATH:/opt/gcc-linaro-9.5.0-2021.10-x86_64_arm-linux-gnueabihf/bin
+          export KERNEL_SRC=\$(pwd)/kernel
+          export UBOOT_SRC=\$(pwd)/u-boot
+          export ROOTFS_DIR=\$(pwd)/rootfs
+          export DRIVER_SRC=\$(pwd)/driver/rtl8188ftv
+          export OUTPUT_DIR=\$(pwd)/output
+          export MEM_SIZE=1024  # 1GB内存
+          export STORAGE_SIZE=8192  # 8GB存储
           EOF
           chmod +x ./env.sh
-          # 提前加载一次，写入环境变量
+
+      - name: 编译 U-Boot
+        run: |
+          cd hi3798mv100-ubuntu
           source ./env.sh
-          # 验证变量是否生效
-          echo "ARCH=$ARCH"
-          echo "CROSS_COMPILE=$CROSS_COMPILE"
-          echo "ENV_LOADED=$ENV_LOADED"
+          cd \$UBOOT_SRC
+          make hi3798mv100_defconfig
+          make -j$(nproc)
+          cp u-boot.bin \$OUTPUT_DIR/
 
-      - name: 配置内核（通过脚本加载 env.sh）
+      - name: 配置并编译内核（含驱动）
         run: |
-          # 用 bash 脚本包裹，确保环境变量继承
-          bash -c '
-            source ./env.sh
-            echo "当前 ENV_LOADED=$ENV_LOADED"
-            if [ -f ".config" ]; then rm .config; fi
-            make hi3798mv100_defconfig
-            echo "CONFIG_RTL8188FTV=m" >> .config
-            echo "CONFIG_RTL8188FTV_POWER_MGMT=y" >> .config
-            echo "CONFIG_USB_PRINTER=y" >> .config
-            echo "CONFIG_USB_PRINTER_CLASS=y" >> .config
-          '
+          cd hi3798mv100-ubuntu
+          source ./env.sh
+          cd \$KERNEL_SRC
+          # 加载默认配置并启用所需功能
+          make hi3798mv100_defconfig
+          echo "CONFIG_RTL8188FTV=m" >> .config
+          echo "CONFIG_USB_PRINTER=y" >> .config
+          echo "CONFIG_LP=y" >> .config
+          echo "CONFIG_CUPS_SUPPORT=y" >> .config
+          make oldconfig
+          # 编译内核和模块
+          make -j$(nproc) zImage
+          make -j$(nproc) dtbs
+          make -j$(nproc) modules
+          # 拷贝内核文件到输出目录
+          cp arch/arm/boot/zImage \$OUTPUT_DIR/
+          cp arch/arm/boot/dts/hi3798mv100.dtb \$OUTPUT_DIR/
+          # 安装内核模块到临时目录（后续拷贝到根文件系统）
+          make INSTALL_MOD_PATH=\$(pwd)/modules_install modules_install
+          cp -r modules_install/lib \$OUTPUT_DIR/
 
-      - name: 编译固件（通过脚本加载 env.sh）
+      - name: 编译 RTL8188FTV 驱动模块
         run: |
-          bash -c '
-            source ./env.sh
-            make -j$(nproc)
-            mkdir -p output
-            find . -name "*.bin" -o -name "*.img" -o -name "*.dtb" | xargs -I {} cp {} output/
-            tar -czvf hi3798mv100-firmware.tar.gz output/
-          '
+          cd hi3798mv100-ubuntu
+          source ./env.sh
+          cd \$DRIVER_SRC
+          # 关联内核源码编译驱动
+          make KSRC=\$KERNEL_SRC
+          # 拷贝驱动到输出目录
+          find . -name "*.ko" -exec cp {} \$OUTPUT_DIR/ \;
 
-      - name: 上传固件
+      - name: 构建 Ubuntu 根文件系统（armhf）
+        run: |
+          cd hi3798mv100-ubuntu
+          source ./env.sh
+          # 下载基础根文件系统
+          wget http://cdimage.ubuntu.com/ubuntu-base/releases/20.04/release/ubuntu-base-20.04.6-base-armhf.tar.gz -O \$OUTPUT_DIR/ubuntu-base.tar.gz
+          sudo tar -xf \$OUTPUT_DIR/ubuntu-base.tar.gz -C \$ROOTFS_DIR
+          # 配置根文件系统（添加必要工具和服务）
+          sudo cp /usr/bin/qemu-arm-static \$ROOTFS_DIR/usr/bin/
+          sudo chroot \$ROOTFS_DIR /bin/bash -c "
+            apt update && apt install -y sudo network-manager cups wireless-tools net-tools
+            useradd -m -s /bin/bash ubuntu && echo 'ubuntu:ubuntu' | chpasswd && adduser ubuntu sudo
+            systemctl enable cups
+            systemctl enable NetworkManager
+          "
+          # 拷贝内核模块和驱动到根文件系统
+          sudo cp -r \$OUTPUT_DIR/lib/modules \$ROOTFS_DIR/lib/
+          sudo mkdir -p \$ROOTFS_DIR/lib/modules/\$(uname -r)/kernel/drivers/net/wireless/
+          sudo cp \$OUTPUT_DIR/*.ko \$ROOTFS_DIR/lib/modules/\$(uname -r)/kernel/drivers/net/wireless/
+
+      - name: 打包 1+8 固件镜像
+        run: |
+          cd hi3798mv100-ubuntu
+          source ./env.sh
+          # 创建8GB镜像文件
+          dd if=/dev/zero of=\$OUTPUT_DIR/ec6108v9_ubuntu_1+8.img bs=1M count=\$STORAGE_SIZE
+          # 分区（boot: 200MB, rootfs: 剩余空间）
+          parted \$OUTPUT_DIR/ec6108v9_ubuntu_1+8.img mklabel msdos
+          parted \$OUTPUT_DIR/ec6108v9_ubuntu_1+8.img mkpart primary fat32 1M 200M
+          parted \$OUTPUT_DIR/ec6108v9_ubuntu_1+8.img mkpart primary ext4 200M 100%
+          # 格式化并挂载分区
+          LOOP_DEV=\$(sudo losetup -f)
+          sudo losetup -P \$LOOP_DEV \$OUTPUT_DIR/ec6108v9_ubuntu_1+8.img
+          sudo mkfs.vfat \${LOOP_DEV}p1
+          sudo mkfs.ext4 \${LOOP_DEV}p2
+          mkdir -p boot_mount root_mount
+          sudo mount \${LOOP_DEV}p1 boot_mount
+          sudo mount \${LOOP_DEV}p2 root_mount
+          # 拷贝启动文件和根文件系统
+          sudo cp \$OUTPUT_DIR/zImage boot_mount/
+          sudo cp \$OUTPUT_DIR/hi3798mv100.dtb boot_mount/
+          sudo cp \$OUTPUT_DIR/u-boot.bin boot_mount/
+          sudo cp -r \$ROOTFS_DIR/* root_mount/
+          # 卸载分区
+          sudo umount boot_mount root_mount
+          sudo losetup -d \$LOOP_DEV
+          # 压缩镜像
+          gzip \$OUTPUT_DIR/ec6108v9_ubuntu_1+8.img
+
+      - name: 上传最终固件
         uses: actions/upload-artifact@v4
         with:
-          name: hi3798mv100-firmware
-          path: hi3798mv100-firmware.tar.gz
+          name: ec6108v9-ubuntu-1+8-firmware
+          path: hi3798mv100-ubuntu/output/ec6108v9_ubuntu_1+8.img.gz
