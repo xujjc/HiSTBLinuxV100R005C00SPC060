@@ -1,129 +1,85 @@
-name: Hi3798mv100在线编译（保留USB打印+集成RTL8188FTV）
+name: Hi3798MV100 固件编译
 
 on:
-  workflow_dispatch:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
-    env:
-      KERNEL_VERSION: 4.4.35
-      DRIVER_REPO: kelebek333/rtl8188fu
-      DRIVER_BRANCH: 4.4.x
-      ARCH: arm
-      CROSS_COMPILE: arm-linux-gnueabihf-
-
+    name: 编译 Hi3798MV100 固件
+    runs-on: ubuntu-latest
+    container:
+      image: hisilicon/hi3798mv100-sdk:latest
     steps:
-    - name: 缓存内核源码
-      uses: actions/cache@v3
-      with:
-        path: |
-          HiSTBLinux/source/kernel/linux-4.4.y
-          third_party/open_source
-        key: kernel-${{ env.KERNEL_VERSION }}-${{ hashFiles('third_party/open_source/linux-4.4.35.tar.gz') }}
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          submodules: true
 
-    - name: 拉取源码
-      uses: actions/checkout@v4
-      with:
-        repository: zjkanjie/HiSTBLinuxV100R005C00SPC060
-        path: HiSTBLinux
+      - name: 设置环境变量
+        run: |
+          export ARCH=arm
+          export CROSS_COMPILE=arm-hisiv300-linux-
+          export PATH=$PATH:/opt/hisilicon/toolchains/arm-hisiv300-linux/bin
 
-    - name: 安装依赖
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y --no-install-recommends \
-          make=3.81-8.2ubuntu3 \
-          gcc-arm-linux-gnueabihf \
-          gettext bison flex bc \
-          zlib1g-dev libncurses5-dev \
-          lzma git build-essential
-        sudo ln -sf /bin/bash /bin/sh
+      - name: 内核配置
+        run: |
+          make hi3798mv100_defconfig
+          make menuconfig -silentoldconfig <<EOF
+          # 交互式配置选项
+EOF
 
-    - name: 准备内核与驱动
-      run: |
-        cd HiSTBLinux
-        mkdir -p third_party/open_source/
-        
-        # 下载内核源码
-        wget -nc https://www.kernel.org/pub/linux/kernel/v4.x/linux-${{ env.KERNEL_VERSION }}.tar.gz \
-          -O third_party/open_source/linux-${{ env.KERNEL_VERSION }}.tar.gz
-        
-        # 解压内核
-        tar -zxf third_party/open_source/linux-${{ env.KERNEL_VERSION }}.tar.gz \
-          -C source/kernel/ --transform 's|linux-${{ env.KERNEL_VERSION }}|linux-4.4.y|'
-        
-        # 克隆驱动（使用浅层克隆）
-        git clone --depth 1 --branch ${{ env.DRIVER_BRANCH }} \
-          https://github.com/${{ env.DRIVER_REPO }}.git \
-          source/kernel/linux-4.4.y/drivers/net/wireless/rtl8188ftv
+      - name: 启用 RTL8188FTV 驱动
+        run: |
+          sed -i 's/# CONFIG_RTL8188FTV is not set/CONFIG_RTL8188FTV=m/g' .config
+          sed -i 's/# CONFIG_RTL8188FTV_POWER_MGMT is not set/CONFIG_RTL8188FTV_POWER_MGMT=y/g' .config
 
-    - name: 配置内核
-      run: |
-        cd HiSTBLinux
-        KERNEL_WIFI_DIR="source/kernel/linux-4.4.y/drivers/net/wireless"
-        
-        # 添加驱动配置
-        sed -i '/^source "drivers\/net\/wireless\/\*/a source "drivers/net/wireless/rtl8188ftv/Kconfig"' \
-          $KERNEL_WIFI_DIR/Kconfig
-        
-        sed -i '/^obj-\$(CONFIG_RTLWIFI)/a obj-\$(CONFIG_RTL8188FTV) += rtl8188ftv/' \
-          $KERNEL_WIFI_DIR/Makefile
+      - name: 启用 USB 打印支持
+        run: |
+          sed -i 's/# CONFIG_USB_PRINTER is not set/CONFIG_USB_PRINTER=y/g' .config
+          sed -i 's/# CONFIG_USB_PRINTER_CLASS is not set/CONFIG_USB_PRINTER_CLASS=y/g' .config
+          sed -i 's/# CONFIG_USB_PRINTER_DEBUG is not set/CONFIG_USB_PRINTER_DEBUG=y/g' .config
 
-    - name: 生成配置文件
-      run: |
-        cd HiSTBLinux
-        cp configs/hi3798mv100/hi3798mdmo1g_hi3798mv100_cfg.mak ./cfg.mak
-        
-        cd source/kernel/linux-4.4.y
-        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} multi_v7_defconfig
-        
-        # 配置无线驱动
-        cat >> .config << EOF
-        CONFIG_CFG80211=y
-        CONFIG_MAC80211=y
-        CONFIG_RTLWIFI=y
-        CONFIG_RTLWIFI_USB=y
-        CONFIG_RTL8188FTV=y
-        
-        # USB打印配置
-        CONFIG_USB=y
-        CONFIG_USB_UHCI_HCD=y
-        CONFIG_USB_OHCI_HCD=y
-        CONFIG_USB_EHCI_HCD=y
-        CONFIG_USB_PRINTER=y
-        EOF
-        
-        # 验证配置
-        for config in USB=y USB_PRINTER=y EHCI_HCD=y; do
-          if ! grep -q "CONFIG_${config}" .config; then
-            echo "配置验证失败: CONFIG_${config}"
-            exit 1
-          fi
-        done
+      - name: 配置内存为 1GB + 8GB
+        run: |
+          sed -i 's/memory@0x00000000/
+            memory@0x00000000 {
+              device_type = "memory";
+              reg = <0x00000000 0x40000000>; // 1GB 内存
+            };
+            memory@0x40000000 {
+              device_type = "memory";
+              reg = <0x40000000 0x20000000>; // 8GB 扩展内存
+            }/g' arch/arm/boot/dts/hi3798mv100.dts
 
-    - name: 编译内核
-      run: |
-        cd HiSTBLinux/source/kernel/linux-4.4.y
-        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
-          scripts/dtc -j$(nproc)
-        
-        # 修复dtc语法问题
-        sed -i 's/^extern YYLTYPE yylloc;/#extern YYLTYPE yylloc;/' scripts/dtc/dtc-lexer.lex.c
-        
-        # 编译内核
-        make ARCH=${{ env.ARCH }} CROSS_COMPILE=${{ env.CROSS_COMPILE }} \
-          -j$(nproc) V=1 2>&1 | tee kernel.log
+      - name: 编译内核
+        run: |
+          make -j$(nproc)
 
-    - name: 编译固件
-      run: |
-        cd HiSTBLinux
-        make build -j$(nproc) 2>&1 | tee build.log
+      - name: 编译设备树
+        run: |
+          make dtbs
 
-    - name: 上传产物
-      uses: actions/upload-artifact@v4
-      with:
-        name: hi3798mv100-firmware-${{ github.run_id }}
-        path: |
-          HiSTBLinux/out/hi3798mv100/*
-          HiSTBLinux/**/*.log
-        retention-days: 7
+      - name: 编译 u-boot
+        run: |
+          make u-boot
+
+      - name: 生成镜像
+        run: |
+          make image
+
+      - name: 打包固件
+        run: |
+          mkdir -p output
+          cp out/hi3798mv100/hi_kernel.bin output/
+          cp out/hi3798mv100/fastboot-burn.bin output/
+          cp out/hi3798mv100/bootargs.bin output/
+          tar -czvf hi3798mv100-firmware.tar.gz output/
+
+      - name: 上传固件包
+        uses: actions/upload-artifact@v4
+        with:
+          name: hi3798mv100-firmware
+          path: hi3798mv100-firmware.tar.gz
