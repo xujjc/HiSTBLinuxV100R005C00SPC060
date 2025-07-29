@@ -3,7 +3,7 @@ name: Hi3798MV100 固件编译
 on:
   push:
     branches: [main]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:
 
 jobs:
   build:
@@ -14,57 +14,55 @@ jobs:
         with:
           submodules: true
 
-      - name: 安装基础依赖（含 kconfig 工具）
+      - name: 安装基础依赖
         run: |
           sudo apt update
           sudo apt install -y build-essential libncurses5-dev libssl-dev \
-            git wget unzip flex bison make gcc g++ python3 kconfig-frontends
+            git wget unzip flex bison make gcc g++ python3
 
       - name: 下载交叉编译工具链
         run: |
           wget https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
           sudo tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
           echo "PATH=/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin:$PATH" >> $GITHUB_ENV
+          echo "ARCH=arm" >> $GITHUB_ENV
+          echo "CROSS_COMPILE=arm-linux-gnueabihf-" >> $GITHUB_ENV
 
-      - name: 初始化编译环境（生成 env.sh）
+      - name: 初始化环境变量
         run: |
-          if [ ! -f ./env.sh ]; then
-            echo "创建默认 env.sh"
-            cat > env.sh <<EOF
-          #!/bin/bash
-          export ARCH=arm
-          export CROSS_COMPILE=arm-linux-gnueabihf-
-          export PATH=\$PATH:/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin
-          export KERNEL_SRC=\$(pwd)
-          EOF
-            chmod +x ./env.sh
+          # 直接设置环境变量，不依赖源码内的 env.sh
+          echo "export ARCH=arm" >> ~/.bashrc
+          echo "export CROSS_COMPILE=arm-linux-gnueabihf-" >> ~/.bashrc
+          echo "export PATH=\$PATH:/opt/gcc/.inaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin" >> ~/.bashrc
+          source ~/.bashrc
+
+      - name: 配置内核（跳过不支持的目标）
+        run: |
+          # 移除 distclean（源码不支持）
+          # 直接使用已有配置，避免调用不支持的命令
+          if [ -f ".config" ]; then
+            rm .config  # 清除旧配置
           fi
-          source ./env.sh
-
-      - name: 配置内核（启用驱动）
-        run: |
-          source ./env.sh
-          make distclean || true
-          make hi3798mv100_defconfig
+          make hi3798mv100_defconfig  # 生成默认配置
+          # 强制写入驱动配置（不依赖 silentoldconfig）
+          sed -i '/CONFIG_RTL8188FTV/d' .config
           echo "CONFIG_RTL8188FTV=m" >> .config
           echo "CONFIG_RTL8188FTV_POWER_MGMT=y" >> .config
+          sed -i '/CONFIG_USB_PRINTER/d' .config
           echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_USB_PRINTER_CLASS=y" >> .config
-          make silentoldconfig
 
       - name: 编译固件
         run: |
-          source ./env.sh
-          make -j$(nproc)
+          source ~/.bashrc
+          make -j$(nproc)  # 直接编译，不依赖配置后处理
           mkdir -p output
-          find ./arch/arm/boot -name "zImage" -exec cp {} output/ \;
-          find ./arch/arm/boot/dts -name "*.dtb" -exec cp {} output/ \;
-          find . -name "u-boot.bin" -exec cp {} output/ \;
+          # 根据实际生成的文件调整路径
+          find . -name "*.bin" -o -name "*.img" -o -name "*.dtb" | xargs -I {} cp {} output/
           tar -czvf hi3798mv100-firmware.tar.gz output/
 
-      - name: 上传固件（使用 v4 版本）
-        uses: actions/upload-artifact@v4  # 已更新为 v4 版本
+      - name: 上传固件
+        uses: actions/upload-artifact@v4
         with:
           name: hi3798mv100-firmware
           path: hi3798mv100-firmware.tar.gz
-          retention-days: 7  # 可选：设置 artifacts 保留时间（默认90天）
