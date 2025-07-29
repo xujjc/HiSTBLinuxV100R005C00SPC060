@@ -1,6 +1,7 @@
 name: Hi3798MV100 固件编译
 
 on:
+  workflow_dispatch:
   push:
     branches: [main]
   pull_request:
