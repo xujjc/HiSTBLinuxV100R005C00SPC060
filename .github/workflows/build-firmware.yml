@@ -20,44 +20,51 @@ jobs:
           sudo apt install -y build-essential libncurses5-dev libssl-dev \
             git wget unzip flex bison make gcc g++ python3
 
-      - name: 下载交叉编译工具链
+      - name: 下载工具链并生成 env.sh
         run: |
+          # 下载工具链
           wget https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
           sudo tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
-
-      - name: 生成强制要求的 env.sh
-        run: |
-          # 生成脚本要求的 env.sh，确保路径正确
-          cat > ./env.sh <<EOF
+          # 生成 env.sh，加入特殊标记变量（可能被脚本检测）
+          cat > ./env.sh <<'EOF'
           #!/bin/bash
           export ARCH=arm
           export CROSS_COMPILE=arm-linux-gnueabihf-
-          export PATH=\$PATH:/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin
-          export KERNEL_SRC=\$(pwd)
+          export PATH=$PATH:/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin
+          export KERNEL_SRC=$(pwd)
+          export ENV_LOADED=1  # 新增标记变量，可能被 base.mak 检测
           EOF
-          chmod +x ./env.sh  # 必须添加执行权限
-
-      - name: 配置内核（严格加载 env.sh）
-        run: |
-          # 严格按照脚本要求执行 source ./env.sh
+          chmod +x ./env.sh
+          # 提前加载一次，写入环境变量
           source ./env.sh
-          # 清除旧配置（手动删除，不依赖 make distclean）
-          if [ -f ".config" ]; then rm .config; fi
-          make hi3798mv100_defconfig
-          # 写入驱动配置
-          echo "CONFIG_RTL8188FTV=m" >> .config
-          echo "CONFIG_RTL8188FTV_POWER_MGMT=y" >> .config
-          echo "CONFIG_USB_PRINTER=y" >> .config
-          echo "CONFIG_USB_PRINTER_CLASS=y" >> .config
+          # 验证变量是否生效
+          echo "ARCH=$ARCH"
+          echo "CROSS_COMPILE=$CROSS_COMPILE"
+          echo "ENV_LOADED=$ENV_LOADED"
 
-      - name: 编译固件
+      - name: 配置内核（通过脚本加载 env.sh）
         run: |
-          # 编译前再次加载 env.sh，确保脚本识别
-          source ./env.sh
-          make -j$(nproc)
-          mkdir -p output
-          find . -name "*.bin" -o -name "*.img" -o -name "*.dtb" | xargs -I {} cp {} output/
-          tar -czvf hi3798mv100-firmware.tar.gz output/
+          # 用 bash 脚本包裹，确保环境变量继承
+          bash -c '
+            source ./env.sh
+            echo "当前 ENV_LOADED=$ENV_LOADED"
+            if [ -f ".config" ]; then rm .config; fi
+            make hi3798mv100_defconfig
+            echo "CONFIG_RTL8188FTV=m" >> .config
+            echo "CONFIG_RTL8188FTV_POWER_MGMT=y" >> .config
+            echo "CONFIG_USB_PRINTER=y" >> .config
+            echo "CONFIG_USB_PRINTER_CLASS=y" >> .config
+          '
+
+      - name: 编译固件（通过脚本加载 env.sh）
+        run: |
+          bash -c '
+            source ./env.sh
+            make -j$(nproc)
+            mkdir -p output
+            find . -name "*.bin" -o -name "*.img" -o -name "*.dtb" | xargs -I {} cp {} output/
+            tar -czvf hi3798mv100-firmware.tar.gz output/
+          '
 
       - name: 上传固件
         uses: actions/upload-artifact@v4
