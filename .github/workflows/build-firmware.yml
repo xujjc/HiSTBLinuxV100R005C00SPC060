@@ -37,10 +37,12 @@ jobs:
           kmod \
           pkg-config
 
-    - name: Add RT8188FTV driver (alternative source)
+    - name: Add RT8188FTV driver (direct zip download)
       run: |
-        # 使用专门为4.4内核适配的驱动仓库
-        git clone https://github.com/jwrdegoede/rtl8188fu.git --depth=1 --branch=rtl8188fu-5.7.4
+        # 直接下载驱动源码ZIP文件
+        wget https://github.com/kelebek333/rtl8188fu/archive/main.zip -O rtl8188fu.zip
+        unzip rtl8188fu.zip -d .
+        mv rtl8188fu-main rtl8188fu
         
         # 复制驱动到内核源码
         mkdir -p source/kernel/linux-4.4.y/drivers/net/wireless/realtek/rtl8188fu
@@ -119,6 +121,9 @@ jobs:
         # 添加缺失的头文件
         sed -i '1i #include <linux/version.h>' drivers/net/wireless/realtek/rtl8188fu/core/rtw_br_ext.c
         sed -i '1i #include <linux/ieee80211.h>' drivers/net/wireless/realtek/rtl8188fu/core/rtw_mlme_ext.c
+        
+        # 修复编译错误
+        sed -i 's/ieee80211_is_robust_mgmt_frame/skb_frag_size_robust/g' drivers/net/wireless/realtek/rtl8188fu/os_dep/linux/ioctl_cfg80211.c
         
         cd ../..
 
