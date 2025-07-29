@@ -7,43 +7,60 @@ on:
 
 jobs:
   build:
-    runs-on: ubuntu-22.04  # 用官方Ubuntu镜像，不依赖私有容器
+    runs-on: ubuntu-22.04
     steps:
       - name: 检出代码
         uses: actions/checkout@v4
         with:
           submodules: true
 
-      - name: 安装依赖
+      - name: 安装基础依赖
         run: |
           sudo apt update
           sudo apt install -y build-essential libncurses5-dev libssl-dev \
             git wget unzip flex bison make gcc g++ python3
 
-      - name: 下载并安装工具链
+      - name: 下载交叉编译工具链
         run: |
           wget https://releases.linaro.org/components/toolchain/binaries/7.5-2019.12/arm-linux-gnueabihf/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz
           sudo tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
           echo "PATH=/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin:$PATH" >> $GITHUB_ENV
-          echo "ARCH=arm" >> $GITHUB_ENV
-          echo "CROSS_COMPILE=arm-linux-gnueabihf-" >> $GITHUB_ENV
+
+      - name: 初始化编译环境
+        run: |
+          # 检查并创建 env.sh（若缺失）
+          if [ ! -f ./env.sh ]; then
+            echo "创建默认 env.sh"
+            cat > env.sh <<EOF
+          #!/bin/bash
+          export ARCH=arm
+          export CROSS_COMPILE=arm-linux-gnueabihf-
+          export PATH=\$PATH:/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin
+          export KERNEL_SRC=\$(pwd)
+          EOF
+            chmod +x ./env.sh
+          fi
+          # 加载环境变量
+          source ./env.sh
 
       - name: 配置内核（启用驱动）
         run: |
+          source ./env.sh  # 再次加载确保环境变量生效
           make hi3798mv100_defconfig
-          # 启用RTL8188FTV驱动
+          # 启用 RTL8188FTV 驱动
           echo "CONFIG_RTL8188FTV=m" >> .config
           echo "CONFIG_RTL8188FTV_POWER_MGMT=y" >> .config
-          # 启用USB打印支持
+          # 启用 USB 打印支持
           echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_USB_PRINTER_CLASS=y" >> .config
           make olddefconfig  # 应用配置
 
       - name: 编译固件
         run: |
+          source ./env.sh
           make -j$(nproc)
           mkdir -p output
-          find . -name "*.bin" -exec cp {} output/ \;
+          find . -name "*.bin" -maxdepth 3 -exec cp {} output/ \;  # 限制查找深度，避免复制过多文件
           tar -czvf hi3798mv100-firmware.tar.gz output/
 
       - name: 上传固件
