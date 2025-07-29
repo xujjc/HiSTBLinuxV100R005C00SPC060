@@ -14,11 +14,11 @@ jobs:
         with:
           submodules: true
 
-      - name: 安装基础依赖
+      - name: 安装基础依赖（含 kconfig 工具）
         run: |
           sudo apt update
           sudo apt install -y build-essential libncurses5-dev libssl-dev \
-            git wget unzip flex bison make gcc g++ python3
+            git wget unzip flex bison make gcc g++ python3 kconfig-frontends
 
       - name: 下载交叉编译工具链
         run: |
@@ -26,9 +26,8 @@ jobs:
           sudo tar -xf gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf.tar.xz -C /opt/
           echo "PATH=/opt/gcc-linaro-7.5.0-2019.12-x86_64_arm-linux-gnueabihf/bin:$PATH" >> $GITHUB_ENV
 
-      - name: 初始化编译环境
+      - name: 初始化编译环境（生成 env.sh）
         run: |
-          # 检查并创建 env.sh（若缺失）
           if [ ! -f ./env.sh ]; then
             echo "创建默认 env.sh"
             cat > env.sh <<EOF
@@ -40,31 +39,32 @@ jobs:
           EOF
             chmod +x ./env.sh
           fi
-          # 加载环境变量
           source ./env.sh
 
       - name: 配置内核（启用驱动）
         run: |
-          source ./env.sh  # 再次加载确保环境变量生效
+          source ./env.sh
+          make distclean || true
           make hi3798mv100_defconfig
-          # 启用 RTL8188FTV 驱动
           echo "CONFIG_RTL8188FTV=m" >> .config
           echo "CONFIG_RTL8188FTV_POWER_MGMT=y" >> .config
-          # 启用 USB 打印支持
           echo "CONFIG_USB_PRINTER=y" >> .config
           echo "CONFIG_USB_PRINTER_CLASS=y" >> .config
-          make olddefconfig  # 应用配置
+          make silentoldconfig
 
       - name: 编译固件
         run: |
           source ./env.sh
           make -j$(nproc)
           mkdir -p output
-          find . -name "*.bin" -maxdepth 3 -exec cp {} output/ \;  # 限制查找深度，避免复制过多文件
+          find ./arch/arm/boot -name "zImage" -exec cp {} output/ \;
+          find ./arch/arm/boot/dts -name "*.dtb" -exec cp {} output/ \;
+          find . -name "u-boot.bin" -exec cp {} output/ \;
           tar -czvf hi3798mv100-firmware.tar.gz output/
 
-      - name: 上传固件
-        uses: actions/upload-artifact@v4
+      - name: 上传固件（使用 v4 版本）
+        uses: actions/upload-artifact@v4  # 已更新为 v4 版本
         with:
           name: hi3798mv100-firmware
           path: hi3798mv100-firmware.tar.gz
+          retention-days: 7  # 可选：设置 artifacts 保留时间（默认90天）
